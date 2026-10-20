@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "vite.config.ts",
+    "apps/api/src/**/*.ts",
+    "apps/web/src/**/*.ts",
+    "apps/web/src/**/*.tsx",
+    "apps/web/next-env.d.ts",
+    "packages/db/src/**/*.ts",
+    "packages/db/drizzle.config.ts"
+  ],
+  "exclude": ["node_modules", "**/node_modules", "**/dist", "**/.next"]
+}

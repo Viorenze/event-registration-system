@@ -1,0 +1,27 @@
+name: event-system
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    ports:
+      # 严格绑定 127.0.0.1，端口由环境变量指定，未设置则报错
+      - "127.0.0.1:${POSTGRES_PORT:?POSTGRES_PORT must be set}:5432"
+    environment:
+      # 严禁弱默认值，未配置或为空时 Compose 必须显式报错终止
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set and non-empty}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set and non-empty}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set and non-empty}
+    volumes:
+      # 官方 PostgreSQL 18+ 规范：必须挂载至 /var/lib/postgresql
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  # 遵循项目级命名空间隔离，自动命名为 event-system_postgres_data
+  postgres_data:
