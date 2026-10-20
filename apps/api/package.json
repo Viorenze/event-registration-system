@@ -3,12 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "dev": "node --watch src/index.ts",
     "start": "node src/index.ts"
   },
   "dependencies": {
+    "@event-system/db": "workspace:*",
     "@hono/node-server": "^2.1.5",
+    "@hono/zod-openapi": "^1.6.3",
+    "better-auth": "1.7.11",
     "hono": "^4.13.13",
     "zod": "^4.6.7"
   },

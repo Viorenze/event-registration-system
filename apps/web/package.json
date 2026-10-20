@@ -8,11 +8,13 @@
     "start": "next start"
   },
   "dependencies": {
+    "hono": "^4.13.13",
     "next": "^16.4.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@event-system/api": "workspace:*",
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
