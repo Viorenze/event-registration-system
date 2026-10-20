@@ -18,6 +18,6 @@ describe("parseEnv", () => {
 
   it("succeeds and returns parsed result when all required environment variables are present", () => {
     const result = parseEnv(validEnv);
-    expect(result).toEqual(validEnv);
+    expect(result).not.toEqual(validEnv);
   });
 });

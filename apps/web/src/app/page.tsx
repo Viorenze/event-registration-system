@@ -1,7 +1,6 @@
 export default function HomePage() {
-  const intentionalTypeError: number = "ci-red-check-type-error";
   return (
-    <main data-check={intentionalTypeError}>
+    <main>
       <h1>Event Registration System</h1>
     </main>
   );
