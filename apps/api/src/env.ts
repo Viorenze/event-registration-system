@@ -21,3 +21,36 @@ export function parseEnv(rawEnv: Record<string, string | undefined> = process.en
   }
   return parsed.data;
 }
+
+export function parseTrustedOrigins(rawOrigins: string): string[] {
+  const origins = rawOrigins
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (origins.length === 0) {
+    throw new Error("Invalid TRUSTED_ORIGINS: must contain at least one explicit origin");
+  }
+
+  for (const origin of origins) {
+    if (origin.includes("*")) {
+      throw new Error(`Invalid TRUSTED_ORIGINS: wildcard origin is not allowed (${origin})`);
+    }
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(origin);
+    } catch {
+      throw new Error(`Invalid TRUSTED_ORIGINS: "${origin}" is not a valid URL origin`);
+    }
+    if (
+      (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") ||
+      parsedUrl.origin !== origin
+    ) {
+      throw new Error(
+        `Invalid TRUSTED_ORIGINS: "${origin}" must be an exact http/https origin without path, query, or hash`,
+      );
+    }
+  }
+
+  return origins;
+}
