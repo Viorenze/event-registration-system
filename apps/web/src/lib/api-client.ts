@@ -3,12 +3,14 @@ import { hc } from "hono/client";
 
 export const apiClient = hc<AppType>("/");
 
-export async function fetchApiHealth(echo: string): Promise<{ status: "ok"; echo: string }> {
-  const res = await apiClient.api.health.$get({
-    query: { echo },
+export async function fetchOrgMembers(
+  orgId: string,
+): Promise<Array<{ userId: string; name: string; role: string }>> {
+  const res = await apiClient.api.orgs[":orgId"].members.$get({
+    param: { orgId },
   });
   if (!res.ok) {
-    throw new Error(`Health check failed with HTTP ${res.status}`);
+    throw new Error(`Failed to fetch organization members: HTTP ${res.status}`);
   }
   return await res.json();
 }

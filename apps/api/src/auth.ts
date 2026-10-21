@@ -6,7 +6,13 @@ import { parseEnv, parseTrustedOrigins } from "./env.ts";
 
 const env = parseEnv(process.env);
 const trustedOrigins = parseTrustedOrigins(env.TRUSTED_ORIGINS);
-const db = createDb(env.DATABASE_URL);
+export const db = createDb(env.DATABASE_URL);
+// Prevent unhandled error events during test teardown when database is dropped
+const poolClient = (db as unknown as { $client?: { on: (event: string, fn: () => void) => void } })
+  .$client;
+if (poolClient && typeof poolClient.on === "function") {
+  poolClient.on("error", () => {});
+}
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {

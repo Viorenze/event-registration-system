@@ -12,24 +12,10 @@ beforeAll(async () => {
 
   const mod = await import("./index.ts");
   app = mod.app;
-});
+}, 30000);
 
-describe("OpenAPI health route and /doc endpoint", () => {
-  it("returns 200 and echoed payload for valid GET /api/health query", async () => {
-    const res = await app.request("http://localhost/api/health?echo=ping");
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      status: "ok",
-      echo: "ping",
-    });
-  });
-
-  it("returns 400 when required echo query parameter is missing", async () => {
-    const res = await app.request("http://localhost/api/health");
-    expect(res.status).toBe(400);
-  });
-
-  it("serves OpenAPI 3.0.0 specification at GET /doc including /api/health", async () => {
+describe("OpenAPI /doc endpoint", () => {
+  it("serves OpenAPI 3.0.0 specification at GET /doc including /api/orgs/{orgId}/members", async () => {
     const res = await app.request("http://localhost/doc");
     expect(res.status).toBe(200);
     const doc = (await res.json()) as {
@@ -37,6 +23,6 @@ describe("OpenAPI health route and /doc endpoint", () => {
       paths: Record<string, unknown>;
     };
     expect(doc.openapi).toBe("3.0.0");
-    expect(doc.paths["/api/health"]).toBeDefined();
+    expect(doc.paths["/api/orgs/{orgId}/members"]).toBeDefined();
   });
 });

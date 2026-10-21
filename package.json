@@ -6,8 +6,9 @@
   "scripts": {
     "check": "vp check",
     "test": "vp test",
+    "test:integration": "vp test -c vite.integration.config.ts --run",
     "build:web": "pnpm --filter @event-system/web build",
-    "gate": "vp check && vp test && pnpm --filter @event-system/web build"
+    "gate": "vp check && vp test && pnpm test:integration && pnpm --filter @event-system/db verify:migration && pnpm --filter @event-system/web build"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

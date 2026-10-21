@@ -157,7 +157,7 @@
 
 | 方法 | 路径 | 角色 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/orgs/:orgId/members` | member+ | 成员列表 |
+| GET | `/api/orgs/:orgId/members` | member+ | 成员列表（响应数组每项包含 `userId`、`name`、`role`，不含 `email`） |
 | POST | `/api/orgs/:orgId/members` | admin+ | 按邮箱直接添加已注册用户（BR-2 的退路；邀请走 Better Auth） |
 | GET | `/api/orgs/:orgId/events` | member+ | 活动列表，含确认数和候补数；`limit` 默认 20 |
 | POST | `/api/orgs/:orgId/events` | admin+ | 创建活动 |
@@ -176,11 +176,12 @@
 | 400 | `VALIDATION` | 请求体不合法 |
 | 401 | `UNAUTHENTICATED` | 未登录 |
 | 403 | `FORBIDDEN` | 不是该团队成员，或角色不够 |
-| 404 | `NOT_FOUND` | 活动或报名不存在，或不属于该团队 |
+| 404 | `NOT_FOUND` | 活动或报名不存在，或不属于该团队；BR-2 回退时目标邮箱未注册 |
 | 409 | `REGISTRATION_CLOSED` | 报名截止后报名 |
 | 409 | `EVENT_STARTED` | 活动开始后的变更 |
 | 409 | `EVENT_CANCELLED` | 已取消的活动 |
 | 409 | `CAPACITY_BELOW_CONFIRMED` | 名额调到低于确认人数 |
+| 500 | `INTERNAL_ERROR` | 内部服务器错误（外壳 `{ "error": { "code", "message" } }`，message 不泄露 SQL、连接串或内部细节） |
 
 **条件功能与裁剪**：
 
@@ -336,7 +337,7 @@ Hono RPC 的已知前提：服务端和客户端的 tsconfig 都开 `strict`；�
 
 ## 11. 非功能要求
 
-- **环境变量**：`DATABASE_URL`、`BETTER_AUTH_SECRET`、`BETTER_AUTH_URL`、`TRUSTED_ORIGINS`、`LOG_LEVEL`、`NODE_ENV`。用 Zod 在启动时校验，缺失就启动失败。提供 `.env.example`，真实 `.env` 不提交。
+- **环境变量**：`DATABASE_URL`、`BETTER_AUTH_SECRET`、`BETTER_AUTH_URL`、`TRUSTED_ORIGINS`、`LOG_LEVEL`、`NODE_ENV`，以及仅服务端使用的 `API_HOST`（本地默认 `127.0.0.1`，Compose 为 `0.0.0.0`）与 `API_INTERNAL_URL`（本地 `http://127.0.0.1:3001`，Compose 为 `http://api:3001`）。用 Zod 在启动时校验，缺失就启动失败。提供 `.env.example`，真实 `.env` 不提交。
 - **日志**：结构化 JSON，每条请求记录请求 id、方法、路径、状态码、耗时、用户 id、团队 id。不记录密码、会话令牌、邀请链接。
 - **错误监控**：最小接入，D6 选定工具并记入 DECISIONS.md。
 - **种子数据**：`pnpm seed` 创建两个团队、若干用户和活动，用于演示。并发测试自己建用户，不依赖种子。

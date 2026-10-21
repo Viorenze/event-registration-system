@@ -6,6 +6,7 @@ export default defineConfig({
       "PRD.md",
       "AGENTS.md",
       "D1_PLAN.md",
+      "D2_PLAN.md",
       "docs/**",
       ".agents/**",
       "pnpm-lock.yaml",
@@ -21,5 +22,8 @@ export default defineConfig({
       typeAware: true,
       typeCheck: true,
     },
+  },
+  test: {
+    exclude: ["**/node_modules/**", "**/dist/**", "**/.next/**", "**/*.integration.test.ts"],
   },
 });

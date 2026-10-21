@@ -3,7 +3,8 @@ import pg from "pg";
 import * as authSchema from "./auth-schema.ts";
 
 export * from "./auth-schema.ts";
-export { authSchema };
+export { and, eq, sql } from "drizzle-orm";
+export { authSchema, pg };
 
 export function createDb(connectionString: string) {
   const pool = new pg.Pool({

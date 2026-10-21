@@ -123,3 +123,92 @@
 - HTTPS 与 `Secure` Cookie 属性：本地开发为 HTTP（`http://localhost:3000`），`Secure` 属性未验证。
 - `.agents/rules/db.md` 会话触发验证（B4）：按计划属于可选验证，本次未单独执行会话触发实验（状态：未验证）。
 - CI 中的 PostgreSQL 与迁移门禁：当前 `.github/workflows/ci.yml` 与 `pnpm gate` 仅运行 `vp check`、`vp test`、`pnpm --filter @event-system/web build`，真实 PostgreSQL 测试与迁移门禁按 `PRD.md` 第 10 节于 S1 接入。
+
+## 2026-10-21 S1 组织权限中间件架构方案（方案 H）与类型推断保护
+
+- 选择：
+  - 采用中间件方案 H（前缀级中间件 + 路由级角色检查）：
+    - 在 `apps/api/src/auth-middleware.ts` 实现 `requireOrgMember`（前缀级，挂载于 `/api/orgs/:orgId/*`）与 `requireOrgRole(minRole)`（路由级）。
+    - 中间件优先从 URL 路径参数 `:orgId` 获取组织 ID（不用 `activeOrganizationId`），查询当前用户在 `member` 表中的真实成员记录，并将 `authContext: { user, session, member }` 注入 Hono 上下文 `c.set(...)`。
+    - 针对 `@hono/zod-openapi` 中 `app.use(...)` 会破坏 `app.openapi(...)` 链式调用返回类型、导致 `AppType` 坍缩为 `any` 的已知问题，采用「基础 OpenAPI 应用分离并独立应用中间件」架构（`baseApp = new OpenAPIHono()`，中间件挂载在 `baseApp.use(...)`，路由通过 `baseApp.openapi(...)` 注册，最终导出 `export type AppType = typeof baseApp;`）。
+  - 在 `apps/web/src/types/api-client-guard.ts` 实现类型守卫，静态断言 `NotAny`、`Equal<Arg["param"]["orgId"], string>`，并通过 `@ts-expect-error` 断言类型安全。
+- 原因：符合 `AGENTS.md` 硬规则 3（先过权限中间件、每条查询带 `organization_id`），同时保证 OpenAPI 路由类型推导完整，杜绝 `any` 坍缩。
+- 备选：纯路由级中间件（方案 P，容易漏写导致裸路由）；集中式中间件（方案 S，缺乏路由级微调能力）。
+- 验证：**已验证（通过）**——`isolation.integration.test.ts` 9 项真实数据库集成测试全绿；4 项负向变异控制实验（跳过登录、跳过成员关系、降低角色阈值、未注册路由未进豁免）全部如期变红；`vp check` 与 `api-client-guard.ts` 编译期类型校验通过。
+
+## 2026-10-21 S1 邀请路径实测（I6）与 BR-2 回退未触发判定
+
+- 选择：
+  - 使用 Better Auth 原生 `organization` 插件的邀请机制（端点：`POST /api/auth/organization/invite-member` 与 `POST /api/auth/organization/accept-invitation`）。
+  - 创建邀请调用成功直接返回 `{ id: string }`，无需从服务端日志读取邀请凭证；邀请创建与接收端点均不输出、不记录邀请凭证或链接。
+  - 实测耗时不足 5 分钟，远低于 2 小时时间盒阈值，直接跑通，**不触发 BR-2 降级回退**。
+- 原因：原生邀请机制功能完整且满足安全性与时限要求。
+- 备选：BR-2 直接加成员回退接口 `POST /api/orgs/:orgId/members`（未触发）。
+- 验证：**已验证（通过）**——`invitation-i6.integration.test.ts` 实测通过：
+  - 拒绝用例先于成功用例执行：非成员创建邀请返回 HTTP `400`（`MEMBER_NOT_FOUND`）；普通成员创建邀请返回 HTTP `403`（`YOU_ARE_NOT_ALLOWED_TO_INVITE_USERS_TO_THIS_ORGANIZATION`）；邮箱不匹配的用户接受邀请返回 HTTP `403`（`YOU_ARE_NOT_THE_RECIPIENT_OF_THE_INVITATION`），数据库无新增记录。
+  - 对照组成功用例：Owner 创建邀请返回 HTTP `200`（含 `id`）；匹配邮箱登录用户接受后返回 HTTP `200`，数据库 `member` 表新增匹配行且角色为 `member`。
+
+## 2026-10-21 S1 团队管理权限（I7）实测状态码与 I7(b) 部分验证口径
+
+- 选择与实测状态码：
+  - I7(a)：未登录创建组织返回 HTTP `401`；登录用户创建组织成功返回 HTTP `200`，并在 `member` 表中自动赋予 `owner` 角色。
+  - I7(b)：组织删除已被插件参数 `disableOrganizationDeletion: true` 显式禁用。实测 Owner 调用删除接口返回 HTTP `404`（`ORGANIZATION_DELETION_DISABLED`），数据库 `organization`、`member`、`invitation` 行数完全未变。
+    - **口径声明**：因 D2 阶段尚未创建 `events` 业务表，无法对「活动关联数据未被删除」进行真实物理断言，因此 I7(b) 最终状态严格标定为**「部分验证」（partially verified）**，不拿 0 对 0 充数；活动关联数据保护断言延后至 D3。
+  - I7(c)：普通成员及非组织成员尝试修改/移除目标成员时，分别返回 HTTP `403`（`YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER` / `YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_MEMBER`）或 `400`（`MEMBER_NOT_FOUND`），数据库状态未变；Owner 对照组操作成功。
+  - I7(d)：Admin 尝试将 Owner 降级为 Member，返回 HTTP `403`（`YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER`）；Admin 尝试移除 Owner，返回 HTTP `400`（`YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`），数据库状态完全未变。
+- 原因：如实记录 `better-auth@1.7.11` 的原生 HTTP 状态码与业务边界。
+- 验证：**已验证（I7(a)(c)(d) 通过，I7(b) 部分验证）**——`team-management-i7.integration.test.ts` 全部通过。
+
+## 2026-10-21 `/doc` 与 `/api/health` 路由保留与豁免口径说明
+
+- 选择：
+  - `/doc` 路由保留并显式列入 `routes-exemptions.ts` 豁免清单。
+  - `/api/health` 保留并显式列入 `routes-exemptions.ts` 豁免清单。
+- 差异与证据解释：
+  - S0-B 决策曾记录「除非用户明确批准豁免，否则应予以移除或替换」。
+  - 本轮依据 `AGENTS.md` 首行原则「事实来源是 PRD.md。任务与 PRD.md 冲突，或超出它的范围，停下来问我，不要自行决定。标『【锁定】』的内容不经我同意不得改。」
+  - `PRD.md` 第 7 节 I5 初始豁免清单明确包含：`/api/health`、`/doc`、`/api/auth/*`。
+  - 此外，Docker Compose 中 API 容器的健康检查依赖 `GET http://127.0.0.1:3001/doc` 返回 200，遵守了「不为健康检查新增路由」的硬规则。因此保留 `/doc` 路由并列入豁免清单完全符合锁定 PRD、AGENTS 及 Docker 运行时要求。
+
+## 2026-10-21 浏览器注册、登录、会话与登出 HTTP 实测（T5）
+
+- 选择：
+  - 在 `apps/web/src/app/page.tsx` 实现最小无样式客户端组件，原生调用同源 `/api/auth/*`，携带 `credentials: "include"`，不引入外部组件库或新依赖。
+  - 验收环境严格基于 Docker Compose 全栈运行（Web 监听 `127.0.0.1:3000`，同源代理至 API `http://api:3001`，真实 PostgreSQL 容器运行）。
+- 验证：**已验证（HTTP 下手工通过）**——
+  - 初始数据库：`user: 0, session: 0, account: 0`。
+  - 注册：`POST /api/auth/sign-up/email` 返回 HTTP `200`，下发 Cookie（`Max-Age=604800; Path=/; HttpOnly; SameSite=Lax`，脱敏），数据库各增 1 行（`user: 1, session: 1, account: 1`）。
+  - 读会话：`GET /api/auth/get-session` 返回 HTTP `200`，用户邮箱匹配。
+  - 刷新会话：再次读取 `GET /api/auth/get-session` 会话正常维持。
+  - 退出登录：`POST /api/auth/sign-out` 返回 HTTP `200`，下发清理 Cookie（`Max-Age=0`）；再次读取会话返回 `null`；数据库 `session` 行数减 1 归零（`session: 0`），`user` 与 `account` 保持为 1。
+  - 结论口径严格记录为「HTTP 下手工通过」，不声称已验证 Secure Cookie、HTTPS 或 Playwright。
+
+## 2026-10-21 Docker Compose 全栈编排与构建时配置（T6）
+
+- 选择：
+  - API 与 Web 各自建立精简 Dockerfile。
+  - API 监听地址支持环境变量 `API_HOST`（本地 `127.0.0.1`，容器 `0.0.0.0`）。
+  - 针对 Next.js `rewrites()` 在构建期将目标 URL 固化至 `.next/routes-manifest.json` 的特性，在 `apps/web/Dockerfile` 中配置构建参数 `ARG API_INTERNAL_URL=http://api:3001`，确保容器内部同源代理精确指向 API 容器。
+  - Web 构建复用 API 基础镜像层与 pnpm 存储，使 Web 构建耗时由 6 分钟优化至 15 秒，避免 Docker named pipe 争用超时。
+  - `docker-compose.yml` 严格依据健康状态编排：`postgres` (健康检查 `pg_isready`) -> `migrate` (一次性迁移，`service_completed_successfully`) -> `api` (健康检查 `/doc`，`service_healthy`) -> `web`。
+- 验证：**已验证（通过）**——`docker compose up -d` 全流程成功，迁移退出码 0，API 报告 healthy，Web 成功提供前端页面并代理认证请求。
+
+## 2026-10-21 本地 `pnpm gate` 与 GitHub Actions CI 检查升级（T7）
+
+- 选择：
+  - 本地 `pnpm gate` 升级为：`vp check && vp test && pnpm test:integration && pnpm --filter @event-system/db verify:migration && pnpm --filter @event-system/web build`。数据库不可达时立即非零退出，不自动启动 Docker。
+  - GitHub Actions 配置 4 个独立 Job（包含 3 个新增 check context）：
+    1. `ci`：现有门禁（`vp check`、`vp test`、`next build`）；
+    2. `integration-tests`：启动 PostgreSQL 容器，执行真实数据库集成测试；
+    3. `empty-db-migration`：启动 PostgreSQL 容器，验证从空库初始迁移、二次幂等迁移、迁移记录数与 journal 动态对齐、全部 schema 表存在性核验，以及 `drizzle-kit generate` drift 超时防挂起检查；
+    4. `docker-build`：分别独立构建 API 与 Web 镜像（明确标明仅在 CI 运行，不包含在 `pnpm gate` 中）。
+- 验证：**已验证（通过）**——本地 `pnpm gate` 退出码 0；连接不可达时退出码 1。
+
+## 2026-10-21 D2 已知限制与未验证项
+
+- GitHub 分支保护 API 配置（T8a/T8b）：
+  - 只读检查已获取：`GET /repos/.../branches/main/protection` 返回 HTTP `404 Branch not protected`，rulesets 返回 `[]`。
+  - 写入操作受阻：配置分支保护（`PUT /protection`）与创建 Ruleset（`POST /rulesets`）均返回 HTTP `403 Resource not accessible by personal access token`。核查表明当前 Fine-Grained PAT 具有内容与 PR 读写权限，但未被授予仓库 `Administration: Read & Write` 权限。按 D2 计划与委托规则，本项如实记录为权限受阻，待管理员授权后闭环。
+- `events` 级联删除保护断言（I7(b)）：D2 未建 `events` 业务表，延后至 D3。
+- 业务接口 400 校验缺失：D2 移除了 health 路由参数测试，当前无业务路由产生 400 校验错误，延后至 D3。
+- HTTPS、Secure Cookie 及 Playwright 测试：延后至 D6 整体端到端切片。

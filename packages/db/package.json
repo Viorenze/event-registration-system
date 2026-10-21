@@ -6,6 +6,10 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "verify:migration": "node scripts/verify-empty-db-migration.mjs",
+    "verify:migrated": "node scripts/verify-migrated-db.mjs"
+  },
   "dependencies": {
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1"
