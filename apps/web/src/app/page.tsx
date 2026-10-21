@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+const fail8bCheck: number = "failing check for 8b";
+
 interface SessionData {
   user: {
     id: string;
