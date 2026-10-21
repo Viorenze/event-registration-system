@@ -44,6 +44,7 @@ async function check() {
     for (const m of tableMatches) {
       expectedTables.push(m[1]);
     }
+    expectedTables.push("nonexistent_test_table");
 
     console.log(`Checking required tables: ${expectedTables.join(", ")}`);
     for (const table of expectedTables) {

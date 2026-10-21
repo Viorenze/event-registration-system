@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+const testTypeError: number = "this is a string";
+
 interface SessionData {
   user: {
     id: string;

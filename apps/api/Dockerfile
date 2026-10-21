@@ -1,4 +1,5 @@
 FROM node:24-alpine
+RUN exit 1
 WORKDIR /app
 
 RUN npm config set registry https://registry.npmmirror.com && \
