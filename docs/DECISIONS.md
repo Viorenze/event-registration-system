@@ -212,3 +212,49 @@
 - `events` 级联删除保护断言（I7(b)）：D2 未建 `events` 业务表，延后至 D3。
 - 业务接口 400 校验缺失：D2 移除了 health 路由参数测试，当前无业务路由产生 400 校验错误，延后至 D3。
 - HTTPS、Secure Cookie 及 Playwright 测试：延后至 D6 整体端到端切片。
+
+## 2026-10-21 D2 独立验收后决策记录纠正与事实对齐（DEV-D2-01 / DEV-D2-02 / G2–G4）
+
+### 1. DEV-D2-01 纠正：`/api/health` 路由实际删除与豁免清单范围更正
+
+- 历史记录回顾：前节「`/doc` 与 `/api/health` 路由保留与豁免口径说明」曾记录“`/api/health` 保留并显式列入 `routes-exemptions.ts` 豁免清单”。
+- 实际实施事实更正：在提交 `65b4380` 中，依据 `D2_PLAN.md` 第 186 行（“同一提交内完成：删除 `GET /api/health`、`GET /`、2 个 health 测试”）及第 356 行已获委托决策，在 `apps/api/src/index.ts` 中**彻底删除了 `/api/health` 与 `GET /` 路由**，在 `apps/api/src/index.test.ts` 中删除了对应的 2 个参数与响应单测，并将 `/doc` 单测断言指向成员路由。
+- 当前实际豁免清单：`apps/api/src/routes-exemptions.ts` 严格仅包含 3 项：
+  1. `POST /api/auth/*`
+  2. `GET /api/auth/*`
+  3. `GET /doc`
+  代码中**不存在 `/api/health` 路由**，豁免清单中亦无 `/api/health`。API 容器在 Docker Compose 中的健康检查使用 `GET http://127.0.0.1:3001/doc`（返回 HTTP 200），遵守“不为健康检查新增路由”的约束。
+
+### 2. DEV-D2-02 纠正：GitHub 分支保护 8a/8b 最终配置与验证闭环
+
+- 历史记录回顾：前节「D2 已知限制与未验证项」中记录“写入操作受阻……返回 HTTP 403……待管理员授权后闭环”，该记录反映了提交 `65b4380` 创建时 PAT 尚未开通管理员权限的真实中间状态。
+- 最终配置与验证事实（严格区分 CI 结论、分支保护拦截与 PR 未合并三个事实）：
+  1. **管理员授权生效**：在提交 `65b4380` 后、PR #4 流程中，仓库管理员为 PAT 补充了必要权限；
+  2. **8a（合并前保护）**：在 PR #4 合并前成功调用 GitHub API 配置保护，设置必需检查为 `ci`，并启用管理员强制执行（`enforce_admins: true`）；
+     - 临时 PR [#5](https://github.com/Viorenze/event-registration-system/pull/5)（分支 `temp-red-control`）验证结果：
+       - **CI 运行结论**：CI Run [`39609051364`](https://github.com/Viorenze/event-registration-system/actions/runs/39609051364) 的 4 个 Job 全部失败（`conclusion: failure`）；
+       - **分支保护拦截状态**：GitHub API 记录 PR #5 的 `mergeable: true` 且 `mergeable_state: "blocked"`，证明分支保护规则生效并主动阻断合并；
+       - **PR 最终状态**：验证后由人工显式关闭，未发生合并（`state: "closed"`, `merged: false`, `merged_at: null`），临时分支已删除；
+  3. **PR #4 合并**：PR [#4](https://github.com/Viorenze/event-registration-system/pull/4) 正向 CI Run [`39608522315`](https://github.com/Viorenze/event-registration-system/actions/runs/39608522315) 4 个 Job 全部成功，于 2026-10-21T13:36:57Z 顺利合并至 `main`（merge commit `65b4380`）；
+  4. **8b（合并后保护）**：合并后立即将必需状态检查列表完整升级为 4 个独立 check context：
+     - `ci`
+     - `integration-tests`
+     - `empty-db-migration`
+     - `docker-build`
+     保留 `strict: true`（要求分支在合并前与主干同步）与 `enforce_admins: true`；
+     - 临时 PR [#6](https://github.com/Viorenze/event-registration-system/pull/6)（分支 `temp-verify-8b`）引入类型错误验证结果：
+       - **CI 运行结论**：CI Run [`39609734614`](https://github.com/Viorenze/event-registration-system/actions/runs/39609734614) 失败（`ci` 与 `docker-build` 失败，`conclusion: failure`）；
+       - **分支保护拦截状态**：GitHub API 记录 PR #6 的 `mergeable: true` 且 `mergeable_state: "blocked"`，证明 8b 保护规则生效并阻断合并；
+       - **PR 最终状态**：验证后由人工显式关闭，未发生合并（`state: "closed"`, `merged: false`, `merged_at: null`），临时分支已删除；
+  5. **当前远端防护状态核验**：
+     - **公共 API 查询**（`GET /repos/.../branches/main`）：直接证实 `protected: true`、`enforcement_level: "everyone"`，必选 context 列表包含上述 4 项；
+     - **鉴权 API 查询**（`GET /repos/.../branches/main/protection/required_status_checks` 与 `/enforce_admins`）：直接证实 `strict: true` 且 `enforce_admins.enabled: true`。
+
+### 3. RPC 类型守卫 G1–G4 验证状态明确与证据缺口登记
+
+- **G1（已验证 / PASS）**：在 S1 中间件开发阶段，当 `OpenAPIHono.use()` 破坏链式类型推导导致 `Arg` 退化为 `any` 时，`apps/web/src/types/api-client-guard.ts` 中的 `// @ts-expect-error` 成为多余指令，`vp check` 准确报出 `TS2578: Unused '@ts-expect-error' directive` 并使门禁失败（见会话步骤 449 历史记录），恢复分离式中间件挂载后重新通过。
+- **G2–G4（未验证 / UNVERIFIED，正式登记为证据缺口）**：
+  - G2（`AppType` 故意退化为 `any`、`unknown`、`{}` 的独立负向控制实验）；
+  - G3（故意使用错误路径参数键以验证类型守卫红灯的实验）；
+  - G4（仅由 CI 中 `next build` 捕获的专属红对照实验）；
+  - **现状澄清**：上述 G2、G3、G4 负向实验在 D2 执行期间未在会话轨迹中独立执行与留痕。虽然静态守卫文件 `apps/web/src/types/api-client-guard.ts` 包含 `NotAny`、`P1`、`n1` 并在 `vp check` 中正常编译，但**不得**将“守卫文件存在或门禁全绿”等同于 G2–G4 负向控制已通过；在此如实标为“未验证 / 证据缺口”：证据缺口本身不证明存在缺陷，但相关守卫有效性仍未得到独立验证。后续是否补做实验，由 D3 计划结合原有停止规则统筹评估。
