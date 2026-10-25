@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
+import { isPostgresDatabaseError, type PostgresDatabaseError } from "./db-error-helper.ts";
 import { setupTestDatabase, type TestDatabaseContext } from "./test-helper.ts";
 
 let app: typeof import("./index.ts").app;
@@ -112,16 +114,75 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
     });
   });
 
-  describe("I7(b): Team Deletion Disabled (Partial verification)", () => {
-    it("rejects owner attempting to delete organization with ORGANIZATION_DELETION_DISABLED", async () => {
+  describe("I7(b): Team Deletion Disabled (Full Row-Level DB Snapshot & Foreign Key Protection)", () => {
+    async function getFullOrgSnapshot(targetOrgId: string) {
+      const [orgRows, memberRows, eventRows, invitationRows, counts] = await Promise.all([
+        ctx.pool.query<{ row_data: unknown }>(
+          `SELECT to_jsonb(t.*) AS row_data FROM "organization" t WHERE t.id = $1`,
+          [targetOrgId],
+        ),
+        ctx.pool.query<{ row_data: unknown }>(
+          `SELECT to_jsonb(t.*) AS row_data FROM "member" t WHERE t.organization_id = $1 ORDER BY t.id ASC`,
+          [targetOrgId],
+        ),
+        ctx.pool.query<{ row_data: unknown }>(
+          `SELECT to_jsonb(t.*) AS row_data FROM "events" t WHERE t.organization_id = $1 ORDER BY t.id ASC`,
+          [targetOrgId],
+        ),
+        ctx.pool.query<{ row_data: unknown }>(
+          `SELECT to_jsonb(t.*) AS row_data FROM "invitation" t WHERE t.organization_id = $1 ORDER BY t.id ASC`,
+          [targetOrgId],
+        ),
+        Promise.all([
+          ctx.pool.query<{ c: number }>('SELECT count(*)::int as c FROM "organization"'),
+          ctx.pool.query<{ c: number }>('SELECT count(*)::int as c FROM "member"'),
+          ctx.pool.query<{ c: number }>('SELECT count(*)::int as c FROM "events"'),
+          ctx.pool.query<{ c: number }>('SELECT count(*)::int as c FROM "invitation"'),
+        ]),
+      ]);
+
+      return {
+        org: orgRows.rows.map((r) => r.row_data),
+        members: memberRows.rows.map((r) => r.row_data),
+        events: eventRows.rows.map((r) => r.row_data),
+        invitations: invitationRows.rows.map((r) => r.row_data),
+        globalCounts: {
+          orgCount: counts[0].rows[0].c,
+          memberCount: counts[1].rows[0].c,
+          eventCount: counts[2].rows[0].c,
+          invitationCount: counts[3].rows[0].c,
+        },
+      };
+    }
+
+    it("rejects owner attempting to delete organization with ORGANIZATION_DELETION_DISABLED and preserves all rows verbatim", async () => {
       const owner = await registerUser("owner-i7b@example.com", "Owner I7b");
       const orgId = await createOrg(owner.cookie, "Delete Test Org", "delete-test-org-i7b");
 
-      const [orgCountBefore, memberCountBefore] = await Promise.all([
-        ctx.pool.query('SELECT count(*)::int as c FROM "organization"'),
-        ctx.pool.query('SELECT count(*)::int as c FROM "member"'),
-      ]);
+      // Precondition: Org must have at least 1 event created by real owner
+      const createEventRes = await app.request(`http://localhost/api/orgs/${orgId}/events`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: owner.cookie,
+        },
+        body: JSON.stringify({
+          title: "I7b Event",
+          description: "I7b Event Description",
+          startsAt: new Date(Date.now() + 10 * 86400000).toISOString(),
+          registrationDeadline: new Date(Date.now() + 5 * 86400000).toISOString(),
+          capacity: 10,
+        }),
+      });
+      expect(createEventRes.status).toBe(201);
 
+      // T0: Capture pre-deletion full row snapshots
+      const preSnap = await getFullOrgSnapshot(orgId);
+      expect(preSnap.org.length).toBe(1);
+      expect(preSnap.members.length).toBe(1);
+      expect(preSnap.events.length).toBe(1);
+
+      // T1: Attempt deletion via API
       const resDelete = await app.request("http://localhost/api/auth/organization/delete", {
         method: "POST",
         headers: {
@@ -132,18 +193,59 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
         body: JSON.stringify({ organizationId: orgId }),
       });
 
-      // Better Auth 1.7.11 returns HTTP 404 with code "ORGANIZATION_DELETION_DISABLED"
+      // T2: HTTP assertion - Better Auth 1.7.11 returns HTTP 404 with ORGANIZATION_DELETION_DISABLED
       expect(resDelete.status).toBe(404);
       const body = (await resDelete.json()) as { code: string; message: string };
       expect(body.code).toBe("ORGANIZATION_DELETION_DISABLED");
 
-      // Verify organization and member row counts remain completely unchanged
-      const [orgCountAfter, memberCountAfter] = await Promise.all([
-        ctx.pool.query('SELECT count(*)::int as c FROM "organization"'),
-        ctx.pool.query('SELECT count(*)::int as c FROM "member"'),
-      ]);
-      expect(orgCountAfter.rows[0].c).toBe(orgCountBefore.rows[0].c);
-      expect(memberCountAfter.rows[0].c).toBe(memberCountBefore.rows[0].c);
+      // T3 & T4: Capture post-deletion snapshots and perform deep equality assertions
+      const postSnap = await getFullOrgSnapshot(orgId);
+      expect(postSnap.org).toEqual(preSnap.org);
+      expect(postSnap.members).toEqual(preSnap.members);
+      expect(postSnap.events).toEqual(preSnap.events);
+      expect(postSnap.invitations).toEqual(preSnap.invitations);
+      expect(postSnap.globalCounts).toEqual(preSnap.globalCounts);
+    });
+
+    it("L5: direct SQL DELETE on organization with active events is rejected by foreign key constraint", async () => {
+      const owner = await registerUser("owner-l5@example.com", "Owner L5");
+      const orgId = await createOrg(owner.cookie, "L5 Test Org", "l5-test-org");
+
+      const eventId = crypto.randomUUID();
+      await ctx.pool.query(
+        `INSERT INTO "events" (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW() + interval '10 days', NOW() + interval '5 days', 10, 'open', $5, NOW(), NOW())`,
+        [eventId, orgId, "L5 Event", "L5 Event Description", owner.userId],
+      );
+
+      const client = await ctx.pool.connect();
+      try {
+        await client.query("BEGIN");
+        let caughtDbError: unknown = undefined;
+        let deleteSucceeded = false;
+        try {
+          await client.query(`DELETE FROM "organization" WHERE id = $1`, [orgId]);
+          deleteSucceeded = true;
+        } catch (err: unknown) {
+          caughtDbError = err;
+        } finally {
+          await client.query("ROLLBACK");
+        }
+
+        expect(
+          deleteSucceeded,
+          "Direct DELETE FROM organization should fail with foreign key violation",
+        ).toBe(false);
+        expect(caughtDbError).toBeDefined();
+        expect(isPostgresDatabaseError(caughtDbError)).toBe(true);
+        const pgErr = caughtDbError as PostgresDatabaseError;
+        // In PostgreSQL <=17, RESTRICT raises 23503 (foreign_key_violation).
+        // In PostgreSQL >=18 (used in CI), RESTRICT raises 23001 (restrict_violation) per SQL standard.
+        expect(["23503", "23001"]).toContain(pgErr.code);
+        expect(pgErr.constraint).toBe("events_organization_id_organization_id_fk");
+      } finally {
+        client.release();
+      }
     });
   });
 

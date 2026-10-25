@@ -1,5 +1,5 @@
 // packages/db/scripts/verify-migrated-db.mjs
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -38,11 +38,17 @@ async function check() {
     );
     const existingTables = new Set(tablesRes.rows.map((r) => r.table_name));
 
-    const authSchemaFile = readFileSync(resolve(dbPackageDir, "src/auth-schema.ts"), "utf8");
+    const schemaFiles = ["auth-schema.ts", "events-schema.ts"];
     const expectedTables = [];
-    const tableMatches = authSchemaFile.matchAll(/export const \w+ = pgTable\(\s*"([^"]+)"/g);
-    for (const m of tableMatches) {
-      expectedTables.push(m[1]);
+    for (const sf of schemaFiles) {
+      const p = resolve(dbPackageDir, "src", sf);
+      if (existsSync(p)) {
+        const fileContent = readFileSync(p, "utf8");
+        const tableMatches = fileContent.matchAll(/export const \w+ = pgTable\(\s*"([^"]+)"/g);
+        for (const m of tableMatches) {
+          expectedTables.push(m[1]);
+        }
+      }
     }
 
     console.log(`Checking required tables: ${expectedTables.join(", ")}`);

@@ -258,3 +258,61 @@
   - G3（故意使用错误路径参数键以验证类型守卫红灯的实验）；
   - G4（仅由 CI 中 `next build` 捕获的专属红对照实验）；
   - **现状澄清**：上述 G2、G3、G4 负向实验在 D2 执行期间未在会话轨迹中独立执行与留痕。虽然静态守卫文件 `apps/web/src/types/api-client-guard.ts` 包含 `NotAny`、`P1`、`n1` 并在 `vp check` 中正常编译，但**不得**将“守卫文件存在或门禁全绿”等同于 G2–G4 负向控制已通过；在此如实标为“未验证 / 证据缺口”：证据缺口本身不证明存在缺陷，但相关守卫有效性仍未得到独立验证。后续是否补做实验，由 D3 计划结合原有停止规则统筹评估。
+
+## 2026-10-23 S2-1 设计决策收敛与 K1 验证环境闭环（DEV-S2-01 至 DEV-S2-05）
+
+### 1. DEV-S2-01 活动标题长度 API 校验与 PRD BR-3 锁定规则对齐
+
+- 选择：在 API 路由层（`apps/api`）的请求体 Zod Schema 校验中，活动标题严格采用 `title: z.string().trim().min(1, "title is required").max(120, "title too long")`。
+- 原因：直接与 `PRD.md` §3 锁定业务规则 BR-3（“活动字段：标题（1–120 字）……”）对齐。`PRD.md` §5 数据库定义锁定为 `text, 非空`，底层不作长度截断，物理完整性与业务规则在 API 校验层无缝对齐。
+- 边界澄清：请求体字节数限制（HTTP body size limit）属于服务层/中间件独立的传输层输入大小防护，用于防止超大 JSON 请求体引发内存耗尽（DoS），绝不能代替业务字段的字符长度校验，也不能以字段 `.max()` 宣称完成了请求体大小限制。
+- 备选：API 层采用 `max(255)` 或移除上限（放弃，放行 121–255 字会直接破坏 PRD BR-3 业务契约）。
+
+### 2. DEV-S2-02 `events.organization_id → organization.id` 外键动作设计
+
+- 选择：外键动作显式声明为 `ON DELETE RESTRICT` 与 `ON UPDATE NO ACTION`。
+- 原因：
+  - `ON DELETE RESTRICT`：禁止直接物理删除仍被活动引用的组织，保护活动历史记录、关联报名及避免破坏 INV-2；在应用层拦截物理删除之外，在数据库底层提供物理删除保护。
+  - `ON UPDATE NO ACTION`：组织主键 ID 为唯一标识符，无业务轮换或更新需求，不开放不必要的级联更新。
+- 规范澄清：记录这是针对 `PRD.md` §5 未规定的外键动作作出的设计工程选择，而非声称 PRD 已明确锁定。测试夹具的清理须严格按依赖顺序逆序执行或通过整库销毁解决，严禁依赖级联删除。
+
+### 3. DEV-S2-03 `events.created_by → user.id` 外键动作设计
+
+- 选择：外键动作显式声明为 `ON DELETE RESTRICT` 与 `ON UPDATE NO ACTION`。
+- 原因：
+  - `ON DELETE RESTRICT`：活动创建者仍被活动引用时，拒绝直接删除该用户，避免活动历史及其关联业务数据被连带级联破坏。
+  - `ON UPDATE NO ACTION`：用户主键 ID 无业务更新需求。
+- 规范澄清：`created_by` 为非空列（`NOT NULL`），故 `ON DELETE SET NULL` 物理不适用；`ON DELETE CASCADE` 会造成连带删除风险，予以排除。测试清理必须按依赖树逆序执行。
+
+### 4. DEV-S2-04 `updated_at` 维护机制与保证边界
+
+- 选择：当前阶段采用 Drizzle ORM 的 `$onUpdate(() => new Date())` 管理应用层/ORM 更新路径，不新增数据库触发器，不手写迁移。
+- 原因：完全符合 `AGENTS.md` 硬规则 2（表结构和迁移只由 Drizzle Kit 负责，不手写迁移），且与 `auth-schema.ts` 既有做法保持一致。
+- 保证边界与限制：必须明确记录，Drizzle 的 `$onUpdate()` 仅对经由 Drizzle Query Builder（`db.update()`）发起的更新操作生效；绕过 ORM 的原生 SQL 更新或外部批处理不会自动刷新该时间戳。不得宣称其具备数据库底层的全局物理更新时间保证。当前业务路径全部经由 ORM，满足需求。
+
+### 5. DEV-S2-05 K1 数据库约束测试分阶段验收与 DML 授权缺口确认
+
+- 选择：
+  - S2-2 阶段仅编写测试资产与进行必要的静态源码编译检查（`vp check`），**不连接数据库，不通过执行预期失败的 SQL 来探测 `42P01`**；
+  - 数据库依赖的 K1 用例在 S2-2 严格标记为 **`NOT RUN / UNVERIFIED`**，理由为物理 schema 尚未按既定流水线建立（迁移生成在 S2-3），且当前授权未覆盖其 DML；S2-2 的静态检查不得冒充数据库行为验收。
+  - 真实的 PostgreSQL K1 验证（正向落库、违规 DML 拒绝、SQLSTATE、约束名/列名精确断言）安排在 S2-4a 一次性库正式迁移及目录核对之后执行。
+  - 授权边界与缺口登记：现有 AU-2 文本仅授权了一次性库的“创建、DDL、销毁”及迁移核对，未明确授权测试套件所需的 fixture 插入与违规 DML 写入。保留此操作授权缺口；在作者单独批准 K1 DML 范围之前，严禁执行这些操作。持久开发库迁移仍需独立的 `AR-S2-APPLY` 授权，不得与一次性库授权混淆。
+
+## 2026-10-25 S2 切片实现落地与验收记录（DEV-S2-06 至 DEV-S2-09）
+
+### 1. DEV-S2-06 外键动作确定（DEV-S2-02 与 DEV-S2-03 落地生效）
+- 决定：`events.organization_id → organization.id` 与 `events.created_by → user.id` 外键动作显式声明为 `ON DELETE RESTRICT, ON UPDATE NO ACTION`。
+- 依据：已在迁移 `0001_events.sql` 中生成并在 catalog 核对（`confdeltype = 'r'`, `confupdtype = 'a'`），测试通过正向落库与直接 SQL `DELETE` 拒绝验证。
+- 清理策略：测试清理严格按逆序依赖清理或整库销毁，严禁依赖级联。
+
+### 2. DEV-S2-07 PRD §7 偏差确认（活动列表计数移至 S3）
+- 偏差内容：PRD §7 的 `GET /api/orgs/:orgId/events` 在 S2 切片中不返回 `confirmedCount` 与 `waitlistedCount`，也不返回伪造的 0。
+- 依据：已获作者明确同意，并在 PRD §7 非锁定描述中加注“（确认数、候补数自 S3 起返回）”。该两项计数在 S3 切片结合报名字段与并发计数统一返回。
+
+### 3. DEV-S2-08 数据库层保护边界已知限制说明
+- 现状与边界：`events.organization_id → organization.id` 的 `ON DELETE RESTRICT` 仅在目标组织名下**存在至少 1 个活动**时提供物理层面的硬删除防护。
+- 限制澄清：对于尚未创建任何活动的新建组织或空组织，数据库外键不会阻止对其直接执行 `DELETE FROM organization`。此时组织删除防护仅由应用层 Better Auth 插件的 `disableOrganizationDeletion: true` 配置拦截（返回 404 `ORGANIZATION_DELETION_DISABLED`）。这属于设计上的已知边界与限制。
+
+### 4. DEV-S2-09 500 故障注入验证与未验证项清单
+- **500 故障注入映射（已验证 / PASS）**：在 `events.integration.test.ts` 中针对 `POST /api/orgs/:orgId/events`（通过 `vi.spyOn(db, "transaction")` 注入底层事务异常）与 `GET /api/orgs/:orgId/events`（通过 `vi.spyOn(db, "select")` 注入底层查询异常）分别执行测试，断言均稳定返回 HTTP 500 `{ error: { code: "INTERNAL_ERROR", message: "..." } }`，且返回错误信息完全脱敏，严格不泄露 SQL 语句、内部表名、连接串或数据库密码。全局 `baseApp.onError` 亦作为未捕获异常的安全防线生效。
+- **G2–G4 负向类型守卫实验（未验证 / UNVERIFIED）**：沿用 D2 记录，G2（AppType 故意退化为 any/unknown/{}）、G3（错误路径参数键类型报错）、G4（仅由 next build 捕获的专属红对照）仍保留为未验证缺口。当前已在 `api-client-guard.ts` 中增加对 `PostEventsArg["json"]` 的强类型与负向 `@ts-expect-error` 断言。

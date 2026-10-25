@@ -22,6 +22,7 @@ describe("PostgreSQL test infrastructure smoke test", () => {
     const tables = res.rows.map((r: { table_name: string }) => r.table_name);
     expect(tables).toEqual([
       "account",
+      "events",
       "invitation",
       "member",
       "organization",

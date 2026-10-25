@@ -106,12 +106,18 @@ async function verify() {
       );
       const existingTables = new Set(tablesRes.rows.map((r) => r.table_name));
 
-      // Dynamic expected tables based on authSchema
-      const authSchemaFile = readFileSync(resolve(dbPackageDir, "src/auth-schema.ts"), "utf8");
+      // Dynamic expected tables based on schema files
+      const schemaFiles = ["auth-schema.ts", "events-schema.ts"];
       const expectedTables = [];
-      const tableMatches = authSchemaFile.matchAll(/export const \w+ = pgTable\(\s*"([^"]+)"/g);
-      for (const m of tableMatches) {
-        expectedTables.push(m[1]);
+      for (const sf of schemaFiles) {
+        const filePath = resolve(dbPackageDir, "src", sf);
+        if (existsSync(filePath)) {
+          const content = readFileSync(filePath, "utf8");
+          const tableMatches = content.matchAll(/export const \w+ = pgTable\(\s*"([^"]+)"/g);
+          for (const m of tableMatches) {
+            expectedTables.push(m[1]);
+          }
+        }
       }
 
       console.log(`  Checking required tables: ${expectedTables.join(", ")}`);

@@ -13,3 +13,25 @@ export type P1 = Expect<Equal<Arg["param"]["orgId"], string>>;
 
 // @ts-expect-error orgId 必须是 string(复现 D1 的 echo: 123 实验)
 export const n1: Arg = { param: { orgId: 123 } };
+
+type GetEvents = (typeof apiClient)["api"]["orgs"][":orgId"]["events"]["$get"];
+type GetEventsArg = NonNullable<Parameters<GetEvents>[0]>;
+
+export type NotAnyGetEvents = Expect<IsAny<GetEvents> extends false ? true : false>;
+export type P1GetEvents = Expect<Equal<GetEventsArg["param"]["orgId"], string>>;
+
+// @ts-expect-error orgId 必须是 string
+export const n2: GetEventsArg = { param: { orgId: 123 } };
+
+type PostEvents = (typeof apiClient)["api"]["orgs"][":orgId"]["events"]["$post"];
+type PostEventsArg = NonNullable<Parameters<PostEvents>[0]>;
+
+export type NotAnyPostEvents = Expect<IsAny<PostEvents> extends false ? true : false>;
+export type P1PostEvents = Expect<Equal<PostEventsArg["param"]["orgId"], string>>;
+
+// @ts-expect-error orgId 必须是 string
+export const n3: PostEventsArg["param"] = { orgId: 123 };
+
+export type PostEventsBodyTitle = Expect<Equal<PostEventsArg["json"]["title"], string>>;
+// @ts-expect-error capacity 必须是 number
+export const n4: PostEventsArg["json"]["capacity"] = "not-a-number";
