@@ -10,4 +10,14 @@ export const routesTable: RouteEntry[] = [
     path: "/api/orgs/:orgId/members",
     minRole: "member",
   },
+  {
+    method: "POST",
+    path: "/api/orgs/:orgId/events",
+    minRole: "admin",
+  },
+  {
+    method: "GET",
+    path: "/api/orgs/:orgId/events",
+    minRole: "member",
+  },
 ];

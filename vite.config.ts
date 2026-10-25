@@ -7,6 +7,7 @@ export default defineConfig({
       "AGENTS.md",
       "D1_PLAN.md",
       "D2_PLAN.md",
+      "D3_PLAN.md",
       "docs/**",
       ".agents/**",
       "pnpm-lock.yaml",

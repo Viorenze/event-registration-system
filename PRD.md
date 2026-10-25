@@ -159,7 +159,7 @@
 | --- | --- | --- | --- |
 | GET | `/api/orgs/:orgId/members` | member+ | 成员列表（响应数组每项包含 `userId`、`name`、`role`，不含 `email`） |
 | POST | `/api/orgs/:orgId/members` | admin+ | 按邮箱直接添加已注册用户（BR-2 的退路；邀请走 Better Auth） |
-| GET | `/api/orgs/:orgId/events` | member+ | 活动列表，含确认数和候补数；`limit` 默认 20 |
+| GET | `/api/orgs/:orgId/events` | member+ | 活动列表，含确认数和候补数（确认数、候补数自 S3 起返回）；`limit` 默认 20 |
 | POST | `/api/orgs/:orgId/events` | admin+ | 创建活动 |
 | GET | `/api/orgs/:orgId/events/:eventId` | member+ | 详情，含我的报名状态 |
 | PATCH | `/api/orgs/:orgId/events/:eventId` | admin+ | 修改活动（含名额） |
