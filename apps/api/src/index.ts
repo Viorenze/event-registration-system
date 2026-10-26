@@ -4,6 +4,7 @@ import { asc, eq, events, member, sql, user } from "@event-system/db";
 import { auth, db } from "./auth.ts";
 import { errorResponseSchema, orgAuthMiddleware, requireRole } from "./auth-middleware.ts";
 import { parseEnv } from "./env.ts";
+import { DomainError, register } from "./registrations.ts";
 
 export const env = parseEnv(process.env);
 
@@ -26,6 +27,19 @@ export const eventResponseSchema = z.object({
   createdBy: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
+});
+
+export const eventListItemResponseSchema = eventResponseSchema.extend({
+  confirmedCount: z.number().int(),
+  waitlistedCount: z.number().int(),
+});
+
+export const registrationResponseSchema = z.object({
+  id: z.string().uuid(),
+  eventId: z.string().uuid(),
+  userId: z.string(),
+  status: z.string(),
+  createdAt: z.string(),
 });
 
 const getOrgMembersRoute = createRoute({
@@ -179,7 +193,7 @@ const getOrgEventsRoute = createRoute({
       description: "List of organization events",
       content: {
         "application/json": {
-          schema: z.array(eventResponseSchema),
+          schema: z.array(eventListItemResponseSchema),
         },
       },
     },
@@ -201,6 +215,84 @@ const getOrgEventsRoute = createRoute({
     },
     403: {
       description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal Server Error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+const createRegistrationRoute = createRoute({
+  method: "post",
+  path: "/api/orgs/{orgId}/events/{eventId}/registrations",
+  middleware: [requireRole("member")] as const,
+  request: {
+    params: z.object({
+      orgId: z.string(),
+      eventId: z.string().uuid("Invalid eventId format"),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Existing active registration returned (idempotent)",
+      content: {
+        "application/json": {
+          schema: registrationResponseSchema,
+        },
+      },
+    },
+    201: {
+      description: "Registration created successfully",
+      content: {
+        "application/json": {
+          schema: registrationResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: "Validation error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    401: {
+      description: "Unauthenticated",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    403: {
+      description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Not Found",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    409: {
+      description: "Conflict / Business Rule Rejected",
       content: {
         "application/json": {
           schema: errorResponseSchema,
@@ -327,6 +419,22 @@ export const app = baseApp
     const { limit, offset } = c.req.valid("query");
 
     try {
+      const confirmedCountSql = sql<number>`COALESCE((
+        SELECT count(*)::int
+        FROM "registrations"
+        WHERE "registrations"."event_id" = "events"."id"
+          AND "registrations"."organization_id" = "events"."organization_id"
+          AND "registrations"."status" = 'confirmed'
+      ), 0)`.as("confirmedCount");
+
+      const waitlistedCountSql = sql<number>`COALESCE((
+        SELECT count(*)::int
+        FROM "registrations"
+        WHERE "registrations"."event_id" = "events"."id"
+          AND "registrations"."organization_id" = "events"."organization_id"
+          AND "registrations"."status" = 'waitlisted'
+      ), 0)`.as("waitlistedCount");
+
       const rows = await db
         .select({
           id: events.id,
@@ -340,6 +448,8 @@ export const app = baseApp
           createdBy: events.createdBy,
           createdAt: events.createdAt,
           updatedAt: events.updatedAt,
+          confirmedCount: confirmedCountSql,
+          waitlistedCount: waitlistedCountSql,
         })
         .from(events)
         .where(eq(events.organizationId, orgId))
@@ -353,11 +463,52 @@ export const app = baseApp
         registrationDeadline: r.registrationDeadline.toISOString(),
         createdAt: r.createdAt.toISOString(),
         updatedAt: r.updatedAt.toISOString(),
+        confirmedCount: Number(r.confirmedCount ?? 0),
+        waitlistedCount: Number(r.waitlistedCount ?? 0),
       }));
 
       return c.json(serialized, 200);
     } catch {
       return c.json({ error: { code: "INTERNAL_ERROR", message: "Failed to fetch events" } }, 500);
+    }
+  })
+  .openapi(createRegistrationRoute, async (c) => {
+    const { orgId, eventId } = c.req.valid("param");
+    const sessionUser = c.get("user") as { id: string };
+
+    try {
+      const { registration: reg, isCreated } = await register(db, orgId, eventId, sessionUser.id);
+
+      const responseBody = {
+        id: reg.id,
+        eventId: reg.eventId,
+        userId: reg.userId,
+        status: reg.status,
+        createdAt: reg.createdAt.toISOString(),
+      };
+
+      return c.json(responseBody, isCreated ? 201 : 200);
+    } catch (err) {
+      if (err instanceof DomainError) {
+        if (err.code === "NOT_FOUND") {
+          return c.json({ error: { code: "NOT_FOUND", message: err.message } }, 404);
+        }
+        if (
+          err.code === "REGISTRATION_CLOSED" ||
+          err.code === "EVENT_STARTED" ||
+          err.code === "EVENT_CANCELLED" ||
+          err.code === "CAPACITY_BELOW_CONFIRMED"
+        ) {
+          return c.json({ error: { code: err.code, message: err.message } }, 409);
+        }
+        if (err.code === "VALIDATION") {
+          return c.json({ error: { code: "VALIDATION", message: err.message } }, 400);
+        }
+      }
+      return c.json(
+        { error: { code: "INTERNAL_ERROR", message: "Failed to register for event" } },
+        500,
+      );
     }
   })
   .doc("/doc", {

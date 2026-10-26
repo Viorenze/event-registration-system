@@ -26,6 +26,7 @@ describe("PostgreSQL test infrastructure smoke test", () => {
       "invitation",
       "member",
       "organization",
+      "registrations",
       "session",
       "user",
       "verification",
