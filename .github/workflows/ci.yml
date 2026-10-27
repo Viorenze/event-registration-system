@@ -145,6 +145,85 @@ jobs:
           timeout 30s pnpm --filter @event-system/db exec drizzle-kit generate --config=drizzle.config.ts
           git diff --exit-code packages/db/drizzle
 
+  concurrency-tests:
+    name: concurrency-tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: event_registration_concurrency
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.14.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Add local node_modules/.bin to GITHUB_PATH
+        run: echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Check PostgreSQL connection budget (must be >= 76)
+        env:
+          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/event_registration_concurrency
+        run: |
+          pnpm --filter @event-system/db exec node -e '
+            import pg from "pg";
+            const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+            await client.connect();
+            const res1 = await client.query("SHOW max_connections");
+            const maxConn = parseInt(res1.rows[0].max_connections, 10);
+            const res2 = await client.query("SHOW superuser_reserved_connections");
+            const superuserReserved = parseInt(res2.rows[0].superuser_reserved_connections, 10);
+            let reserved = 0;
+            try {
+              const res3 = await client.query("SHOW reserved_connections");
+              reserved = parseInt(res3.rows[0].reserved_connections, 10) || 0;
+            } catch {}
+            const available = maxConn - superuserReserved - reserved;
+            console.log("PostgreSQL connection budget in CI:");
+            console.log(`  max_connections: ${maxConn}`);
+            console.log(`  superuser_reserved_connections: ${superuserReserved}`);
+            console.log(`  reserved_connections: ${reserved}`);
+            console.log(`  available for regular users: ${available}`);
+            if (available < 76) {
+              console.error(`FATAL: Available connections (${available}) < required budget (76)`);
+              process.exit(1);
+            }
+            console.log("✓ Connection budget check passed: available connections >= 76");
+            await client.end();
+          '
+
+      - name: Run Drizzle Kit migration on empty database
+        env:
+          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/event_registration_concurrency
+        run: pnpm --filter @event-system/db exec drizzle-kit migrate --config=drizzle.config.ts
+
+      - name: Run Concurrency tests (C1, C2, C7)
+        env:
+          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/event_registration_concurrency
+        run: pnpm test:concurrency
+
   docker-build:
     name: docker-build
     runs-on: ubuntu-latest

@@ -38,7 +38,7 @@ async function check() {
     );
     const existingTables = new Set(tablesRes.rows.map((r) => r.table_name));
 
-    const schemaFiles = ["auth-schema.ts", "events-schema.ts"];
+    const schemaFiles = ["auth-schema.ts", "events-schema.ts", "registrations-schema.ts"];
     const expectedTables = [];
     for (const sf of schemaFiles) {
       const p = resolve(dbPackageDir, "src", sf);

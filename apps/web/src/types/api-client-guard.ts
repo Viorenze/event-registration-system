@@ -35,3 +35,16 @@ export const n3: PostEventsArg["param"] = { orgId: 123 };
 export type PostEventsBodyTitle = Expect<Equal<PostEventsArg["json"]["title"], string>>;
 // @ts-expect-error capacity 必须是 number
 export const n4: PostEventsArg["json"]["capacity"] = "not-a-number";
+
+type PostRegistrations =
+  (typeof apiClient)["api"]["orgs"][":orgId"]["events"][":eventId"]["registrations"]["$post"];
+type PostRegistrationsArg = NonNullable<Parameters<PostRegistrations>[0]>;
+
+export type NotAnyPostRegistrations = Expect<IsAny<PostRegistrations> extends false ? true : false>;
+export type P1PostRegistrations = Expect<Equal<PostRegistrationsArg["param"]["orgId"], string>>;
+export type P2PostRegistrations = Expect<Equal<PostRegistrationsArg["param"]["eventId"], string>>;
+
+// @ts-expect-error orgId 必须是 string
+export const n5: PostRegistrationsArg["param"] = { orgId: 123, eventId: "test" };
+// @ts-expect-error eventId 必须是 string
+export const n6: PostRegistrationsArg["param"] = { orgId: "test", eventId: 123 };

@@ -742,7 +742,7 @@ describe("S2 Events Integration & Isolation Tests (A1, I1, I4, H-Reach, L5)", ()
       });
     });
 
-    it("D-7 Option X Contract: does NOT return confirmedCount or waitlistedCount in S2", async () => {
+    it("PRD §7 S3 Contract: returns confirmedCount and waitlistedCount as numbers in S3", async () => {
       const res = await app.request(`http://localhost/api/orgs/${orgAId}/events`, {
         method: "GET",
         headers: { cookie: memberACookie },
@@ -758,9 +758,11 @@ describe("S2 Events Integration & Isolation Tests (A1, I1, I4, H-Reach, L5)", ()
         expect(evt).toHaveProperty("registrationDeadline");
         expect(evt).toHaveProperty("capacity");
         expect(evt).toHaveProperty("status");
-        // Strictly verify counters are absent in S2
-        expect(evt.confirmedCount).toBeUndefined();
-        expect(evt.waitlistedCount).toBeUndefined();
+        // Strictly verify counters are present as non-negative numbers in S3
+        expect(typeof evt.confirmedCount).toBe("number");
+        expect(typeof evt.waitlistedCount).toBe("number");
+        expect((evt.confirmedCount as number) >= 0).toBe(true);
+        expect((evt.waitlistedCount as number) >= 0).toBe(true);
       }
     });
 

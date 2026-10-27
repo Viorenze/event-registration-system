@@ -107,7 +107,7 @@ async function verify() {
       const existingTables = new Set(tablesRes.rows.map((r) => r.table_name));
 
       // Dynamic expected tables based on schema files
-      const schemaFiles = ["auth-schema.ts", "events-schema.ts"];
+      const schemaFiles = ["auth-schema.ts", "events-schema.ts", "registrations-schema.ts"];
       const expectedTables = [];
       for (const sf of schemaFiles) {
         const filePath = resolve(dbPackageDir, "src", sf);
@@ -131,6 +131,11 @@ async function verify() {
       await tempClient.end();
     }
 
+    const preDiff = execSync("git status --porcelain packages/db/drizzle", {
+      cwd: rootDir,
+      encoding: "utf8",
+    });
+
     // 5. Schema drift check (drizzle-kit generate) with timeout
     console.log(`[5/5] Checking schema drift with drizzle-kit generate...`);
     execSync(
@@ -144,12 +149,12 @@ async function verify() {
     );
 
     // Check git diff on drizzle directory
-    const diff = execSync("git status --porcelain packages/db/drizzle", {
+    const postDiff = execSync("git status --porcelain packages/db/drizzle", {
       cwd: rootDir,
       encoding: "utf8",
     });
-    if (diff.trim().length > 0) {
-      throw new Error(`Schema drift detected! Generated changes:\n${diff}`);
+    if (postDiff !== preDiff) {
+      throw new Error(`Schema drift detected! Generated changes:\n${postDiff}`);
     }
     console.log("  ✓ No schema drift detected");
 
