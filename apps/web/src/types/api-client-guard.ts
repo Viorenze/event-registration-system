@@ -48,3 +48,24 @@ export type P2PostRegistrations = Expect<Equal<PostRegistrationsArg["param"]["ev
 export const n5: PostRegistrationsArg["param"] = { orgId: 123, eventId: "test" };
 // @ts-expect-error eventId 必须是 string
 export const n6: PostRegistrationsArg["param"] = { orgId: "test", eventId: 123 };
+
+type PatchEvent = (typeof apiClient)["api"]["orgs"][":orgId"]["events"][":eventId"]["$patch"];
+type PatchEventArg = NonNullable<Parameters<PatchEvent>[0]>;
+
+export type NotAnyPatchEvent = Expect<IsAny<PatchEvent> extends false ? true : false>;
+export type P1PatchEvent = Expect<Equal<PatchEventArg["param"]["orgId"], string>>;
+export type P2PatchEvent = Expect<Equal<PatchEventArg["param"]["eventId"], string>>;
+
+type DeleteRegistrationMe =
+  (typeof apiClient)["api"]["orgs"][":orgId"]["events"][":eventId"]["registrations"]["me"]["$delete"];
+type DeleteRegistrationMeArg = NonNullable<Parameters<DeleteRegistrationMe>[0]>;
+
+export type NotAnyDeleteRegistrationMe = Expect<
+  IsAny<DeleteRegistrationMe> extends false ? true : false
+>;
+export type P1DeleteRegistrationMe = Expect<
+  Equal<DeleteRegistrationMeArg["param"]["orgId"], string>
+>;
+export type P2DeleteRegistrationMe = Expect<
+  Equal<DeleteRegistrationMeArg["param"]["eventId"], string>
+>;

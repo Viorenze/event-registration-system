@@ -36,7 +36,7 @@
 | BR-7 | 递补：取消一条 `confirmed` 后，在同一个事务里，把 `waitlisted` 按 `seq` 从小到大改为 `confirmed`，直到名额满或没有候补。取消一条 `waitlisted` 不触发递补。不跳人。 |
 | BR-8 | 改名额：调大，在同一个事务里按 BR-7 的顺序递补新空出的位置。调小，不得低于当前确认人数，否则拒绝（`CAPACITY_BELOW_CONFIRMED`）。 |
 | BR-9 | 重复与重报：同一活动、同一用户，同一时间只能有一条有效（`confirmed` 或 `waitlisted`）报名。重复报名是幂等的：返回已有报名，不新增，不报错。活动已开始或已取消时，先按 BR-6、BR-10 拒绝；只有报名截止后仍返回已有有效报名（覆盖响应丢失后重试的场景）。取消后可以重新报名，排到队尾。 |
-| BR-10 | 取消活动（优先级最低，时间紧就砍）：owner/admin 可把活动置为 `cancelled`。已取消的活动拒绝报名（含重复报名）、取消报名和一切变更，已有报名保留原样。 |
+| BR-10 | 取消活动（优先级最低，时间紧就砍）：owner/admin 可把活动置为 `cancelled`。已取消的活动拒绝报名（含重复报名）、取消报名和一切变更，已有报名保留原样。活动开始后不可取消活动。 |
 
 ### 不变量【锁定】
 
@@ -147,7 +147,26 @@
 5. 置为 `cancelled`，写 `cancelled_at`。若原状态是 `confirmed`，按 BR-7 递补。
 6. 提交。
 
-**改名额** `updateEvent`：锁活动行，查不到 → 404；读取数据库当前时间；活动已取消 → 409；改名额时活动已开始 → 409（BR-6）；调小按 BR-8 校验；调大按 BR-7 递补；提交。
+**修改活动（含改名额）** `updateEvent(orgId, eventId, patch)`（**S6-a**）：
+
+1. 开事务。锁活动行（`SELECT … FROM events WHERE id = :eventId AND organization_id = :orgId FOR UPDATE`），查不到 → 404。
+2. 读一次 `clock_timestamp()`（独立语句）。
+3. 已取消 → 409 `EVENT_CANCELLED`。
+4. 请求体含 `capacity` 且活动已开始（`dbNow >= starts_at`）→ 409 `EVENT_STARTED`（开始后只改标题或说明仍允许）。
+5. 含 `capacity` 时，先判断调小是否低于当前确认数（`CAPACITY_BELOW_CONFIRMED`）：在 UPDATE 之前，用锁后读到的确认数。
+6. UPDATE 写入各字段。
+7. 含 `capacity` 时，用更新后的容量按 BR-7 递补。
+8. 提交。
+
+**取消活动** `cancelEvent(orgId, eventId)`（**S6-b**）：
+
+1. 权限由中间件先检查（admin+），再进业务代码。
+2. 开事务。锁活动行（同上），查不到 → 404。
+3. 读一次 `clock_timestamp()`（独立语句）。
+4. 活动已取消 → 409 `EVENT_CANCELLED`。
+5. 活动已开始（`dbNow >= starts_at`）→ 409 `EVENT_STARTED`。
+6. 置 `status = 'cancelled'`，更新 `updated_at`。不触碰 `registrations`，不递补。
+7. 提交。
 
 任何时候不得在没有活动行锁的情况下读取确认人数并据此写入。
 
@@ -162,8 +181,8 @@
 | GET | `/api/orgs/:orgId/events` | member+ | 活动列表，含确认数和候补数（确认数、候补数自 S3 起返回）；`limit` 默认 20 |
 | POST | `/api/orgs/:orgId/events` | admin+ | 创建活动 |
 | GET | `/api/orgs/:orgId/events/:eventId` | member+ | 详情，含我的报名状态 |
-| PATCH | `/api/orgs/:orgId/events/:eventId` | admin+ | 修改活动（含名额） |
-| POST | `/api/orgs/:orgId/events/:eventId/cancel` | admin+ | 取消活动（BR-10，可砍） |
+| PATCH | `/api/orgs/:orgId/events/:eventId` | admin+ | 修改活动（含名额）。成功返回 200 及创建活动响应 DTO（复用 `apps/api/src/index.ts` 中的 `eventResponseSchema`，字段详见下文，不含 `confirmedCount`、`waitlistedCount`）。请求体只接受 `title`、`description`、`capacity`，至少一项，拒绝未知字段（`.strict()`）。开始时间与截止时间不可改。请求体含 `capacity` 字段即视为改名额（不比较新旧值），开始后含 `capacity` 一律 409 `EVENT_STARTED`，只改标题或说明允许；`description` 传 `null` 为清空，缺省为不变 |
+| POST | `/api/orgs/:orgId/events/:eventId/cancel` | admin+ | 取消活动（BR-10 保留）。成功返回 200 及创建活动响应 DTO（同上复用 `eventResponseSchema`，`status` 为 `cancelled`） |
 | POST | `/api/orgs/:orgId/events/:eventId/registrations` | member+ | 报名当前用户；首次创建报名返回 201，重复报名（返回已有报名，BR-9）返回 200；响应体都带报名 id 和状态（其余字段在 D3 契约定稿时写入本表） |
 | DELETE | `/api/orgs/:orgId/events/:eventId/registrations/me` | member+ | 取消自己的报名；成功取消返回 204；没有有效报名时也返回 204 且不改库（幂等），但活动已取消或已开始时先返回 409（见第 6 节） |
 | DELETE | `/api/orgs/:orgId/events/:eventId/registrations/:registrationId` | admin+ | 取消他人的报名；按 `registrationId + eventId + organizationId` 查找，查不到 404；成功取消或已取消均返回 204 |
@@ -173,7 +192,7 @@
 
 | 状态码 | code | 场景 |
 | --- | --- | --- |
-| 400 | `VALIDATION` | 请求体不合法 |
+| 400 | `VALIDATION` | 请求体或路径参数不合法 |
 | 401 | `UNAUTHENTICATED` | 未登录 |
 | 403 | `FORBIDDEN` | 不是该团队成员，或角色不够 |
 | 404 | `NOT_FOUND` | 活动或报名不存在，或不属于该团队；BR-2 回退时目标邮箱未注册 |
@@ -182,6 +201,22 @@
 | 409 | `EVENT_CANCELLED` | 已取消的活动 |
 | 409 | `CAPACITY_BELOW_CONFIRMED` | 名额调到低于确认人数 |
 | 500 | `INTERNAL_ERROR` | 内部服务器错误（外壳 `{ "error": { "code", "message" } }`，message 不泄露 SQL、连接串或内部细节） |
+
+中间件先于参数校验：非团队成员访问带非法 UUID 路径参数的受保护接口优先返回 403 `FORBIDDEN`；团队成员访问返回 400 `VALIDATION`。
+
+**创建活动响应 DTO（`eventResponseSchema`，定义于 `apps/api/src/index.ts`）**：
+PATCH 与 POST cancel 的成功响应（200）均完整复用此 DTO（不含 `confirmedCount`、`waitlistedCount`）：
+- `id`: `z.string().uuid()`（UUID 字符串）
+- `organizationId`: `z.string()`（组织 ID 字符串）
+- `title`: `z.string()`（活动标题）
+- `description`: `z.string().nullable().optional()`（说明文本，可为 null）
+- `startsAt`: `z.string()`（ISO 8601 日期时间字符串）
+- `registrationDeadline`: `z.string()`（ISO 8601 日期时间字符串）
+- `capacity`: `z.number()`（名额数值）
+- `status`: `z.string()`（状态：`open` 或 `cancelled`）
+- `createdBy`: `z.string()`（创建者用户 ID）
+- `createdAt`: `z.string()`（ISO 8601 日期时间字符串）
+- `updatedAt`: `z.string()`（ISO 8601 日期时间字符串）
 
 **条件功能与裁剪**：
 
@@ -247,7 +282,7 @@ C 系列直调业务层，不能证明路由层返回了正确的 HTTP 状态码
 
 | 编号 | 场景 | 断言 |
 | --- | --- | --- |
-| A1 | 关键的状态码与错误码映射 | 截止后新用户报名 409 `REGISTRATION_CLOSED`；新用户首次报名 201；截止后已有报名的用户重复报名 200，并返回同一个报名 id；开始后报名、取消、改名额 409 `EVENT_STARTED`；`DELETE …/registrations/me`：成功取消 204，没有有效报名 204，活动已开始 409；`DELETE …/registrations/:registrationId`（admin 调用）：首次成功取消他人的有效报名 204（场景：被取消的是 `confirmed` 且有候补，取消后数据库里 `seq` 最小的候补变为 `confirmed`）；对同一条报名重复取消 204，数据库不变，不再触发递补（确认数和各条报名的状态与第一次取消后完全相同，对应 C8）；用错误的活动 id 与报名 id 组合 404 `NOT_FOUND`；改名额低于确认数 409 `CAPACITY_BELOW_CONFIRMED`；创建活动时 `starts_at` 已过 400 `VALIDATION`；请求体不合法 400 `VALIDATION`；错误响应体符合 `{ "error": { "code", "message" } }`；BR-10 保留时：已取消的活动 409 `EVENT_CANCELLED` |
+| A1 | 关键的状态码与错误码映射（**S8-a**） | 截止后新用户报名 409 `REGISTRATION_CLOSED`；新用户首次报名 201；截止后已有报名的用户重复报名 200，并返回同一个报名 id；开始后报名、取消、改名额 409 `EVENT_STARTED`；`DELETE …/registrations/me`：成功取消 204，没有有效报名 204，活动已开始 409；`DELETE …/registrations/:registrationId`（admin 调用）：首次成功取消他人的有效报名 204 并递补（场景：被取消的是 `confirmed` 且有候补，取消后数据库里 `seq` 最小的候补变为 `confirmed`）；对同一条报名重复取消 204 且全列不变，不再触发递补（确认数和各条报名的状态与第一次取消后完全相同，对应 C8）；用错误的活动 id 与报名 id 组合 404 `NOT_FOUND`，报名行不变；`PATCH`：成功返回 200 与创建活动响应 DTO；开始后含 `capacity` 409 `EVENT_STARTED`（即使值相同）；开始后只改标题 200；已取消 409 `EVENT_CANCELLED`；改名额低于确认数 409 `CAPACITY_BELOW_CONFIRMED`；空 body、未知字段、越界 `capacity` 400 `VALIDATION`；`POST …/cancel`：成功返回 200、`status='cancelled'`，报名行不变；重复取消 409 `EVENT_CANCELLED`；开始后取消 409 `EVENT_STARTED`；所有拒绝操作前后断言数据库不变；路径参数非法 UUID 用 admin 调用返回 400 `VALIDATION`（不得出现 PG `22P02` 导致的 500）；创建活动时 `starts_at` 已过 400 `VALIDATION`；请求体不合法 400 `VALIDATION`；所有错误响应体统一符合 `{ "error": { "code", "message" } }`；BR-10 保留时：已取消的活动 409 `EVENT_CANCELLED` |
 
 ### 隔离（D2 起，D6 补全）
 
@@ -353,4 +388,4 @@ Hono RPC 的已知前提：服务端和客户端的 tsconfig 都开 `strict`；�
 | 工程目录结构 | D1 定，记入 DECISIONS.md。建议 `apps/api`、`apps/web`、`packages/db`、`e2e` |
 | 邀请链接能否在不发邮件时跑通 | D2 实测，超过 2 小时退回 BR-2 的直接添加 |
 | 错误监控工具 | D6 |
-| BR-10 取消活动：保留还是砍掉 | 作者。默认保留，最晚在 D4 的 Sonnet review 之前决定，之后不再改契约。砍掉时的同步清单见第 7 节 |
+| BR-10 取消活动：保留还是砍掉 | 已定：保留（2026-10-27） |

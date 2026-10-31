@@ -219,10 +219,10 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/event_registration_concurrency
         run: pnpm --filter @event-system/db exec drizzle-kit migrate --config=drizzle.config.ts
 
-      - name: Run Concurrency tests (C1, C2, C7)
+      - name: Run Concurrency tests (C1-C8 repeated 5 times)
         env:
           DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/event_registration_concurrency
-        run: pnpm test:concurrency
+        run: node scripts/repeat.mjs 5 -- pnpm test:concurrency
 
   docker-build:
     name: docker-build

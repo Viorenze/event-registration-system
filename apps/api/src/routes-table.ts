@@ -25,4 +25,24 @@ export const routesTable: RouteEntry[] = [
     path: "/api/orgs/:orgId/events/:eventId/registrations",
     minRole: "member",
   },
+  {
+    method: "DELETE",
+    path: "/api/orgs/:orgId/events/:eventId/registrations/me",
+    minRole: "member",
+  },
+  {
+    method: "DELETE",
+    path: "/api/orgs/:orgId/events/:eventId/registrations/:registrationId",
+    minRole: "admin",
+  },
+  {
+    method: "PATCH",
+    path: "/api/orgs/:orgId/events/:eventId",
+    minRole: "admin",
+  },
+  {
+    method: "POST",
+    path: "/api/orgs/:orgId/events/:eventId/cancel",
+    minRole: "admin",
+  },
 ];

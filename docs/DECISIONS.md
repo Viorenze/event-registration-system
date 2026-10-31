@@ -379,3 +379,68 @@
 ### 9. DEV-S3-09 开发环境 Docker 容器拓扑冲突排查与定界
 - 开发环境存在两套 Docker（Windows Docker Desktop 与 WSL2 内独立 Docker），各有同名容器 `event-system-postgres-1` 与同名卷。Docker Desktop 的容器 `bf12e07b38dd` 持有 `127.0.0.1:5433`，当时 7 表 1 条迁移记录；WSL 的容器 `a4492f4a93f5` 有 8 表 2 条迁移记录。
 - 结论：以 Docker Desktop 那套为唯一开发库；WSL 那套已 stop（未 rm，卷保留）。此前"把临时库误认作开发库"的解释作废。
+
+## 2026-10-30 D4（S4）取消、候补递补与名额调整架构决策、变异实验与落地记录（DEV-S4-01 至 DEV-S4-07）
+
+### 1. DEV-S4-01 DEV-S3-06 历史记录更正澄清
+
+- **更正内容**：在 S3 决策记录 `DEV-S3-06` 中，标题与正文将业务规则编号误记为 BR-10（原表述为“业务规则 BR-10（‘活动开始后禁止取消报名’）经作者于 2026-10-27 明确决定保留”）。
+- **事实澄清**：
+  - “活动开始后禁止取消报名”实际对应的业务规则是 **BR-6**；
+  - **BR-10** 的实际定义是 owner/admin 取消活动（“owner/admin 可把活动置为 `cancelled`”）；
+  - 特此追加记录予以纠正，原 `DEV-S3-06` 历史条目保持现状不修改。
+
+### 2. DEV-S4-02 D4 六项架构与契约决策批准记录
+
+- **决定**：作者在 D4 计划中明确批准了以下六项关键契约与边界决策：
+  1. **决策 1（BR-10 保留）**：保留取消活动业务功能（`POST /api/orgs/:orgId/events/:eventId/cancel`），不执行裁剪；
+  2. **决策 2（PATCH 字段校验白名单与不可变字段）**：`PATCH /api/orgs/:orgId/events/:eventId` 请求体只接受 `title`、`description`、`capacity` 三个字段中的至少一项，请求体使用 `.strict()` 拒绝任何未知字段；活动开始时间（`startsAt`）与报名截止时间（`registrationDeadline`）严格不可修改；
+  3. **决策 3（名额变更识别与活动开始后边界）**：请求体只要显式包含 `capacity` 键即视为改名额操作（不与现有值比对）；若活动已开始，包含 `capacity` 的修改一律拒绝并返回 409 `EVENT_STARTED`；活动开始后仅修改 `title` 或 `description` 允许通过（返回 200）；`description` 传入 `null` 表示清空，字段缺省表示保持原值不变；
+  4. **决策 4（PATCH 与 cancel 响应 DTO 复用）**：PATCH 与 cancel 成功响应（200）完整复用创建活动的响应 DTO（`eventResponseSchema`，返回活动全量实体），不包含 `confirmedCount` 与 `waitlistedCount` 计数；
+  5. **决策 5（参数校验先于业务及统一错误格式）**：组织权限中间件先于路径参数校验执行（非组织成员访问返回 403 `FORBIDDEN`，组织成员访问非法 UUID 路径参数返回 400 `VALIDATION`）；所有参数错误均走统一错误体 `{ "error": { "code": "VALIDATION", "message": "..." } }`，杜绝穿透抛出数据库 `22P02` 异常；
+  6. **决策 6（I7 额外 owner 移除用例延期）**：PRD I7 中关于在多 owner 组织中移除其中一个 owner 的额外补充用例延期执行，本切片不做，在验收记录中如实标为延期未测试，不计入通过项。
+
+### 3. DEV-S4-03 新增决策：活动开始后禁止取消活动
+
+- **决定**：在 PRD.md §3 BR-10 规则及 §6 业务流程中明确追加规则——“活动开始后不可取消活动”。
+- **理由**：活动一旦开始，现场已进入签到与进行阶段，若允许组织管理者取消活动，将导致已到场人员状态处于未定义状态；若活动已开始（`dbNow >= starts_at`），调用 `POST /api/orgs/:orgId/events/:eventId/cancel` 抛出 `EVENT_STARTED` 领域错误，由 HTTP 层映射为 409 `EVENT_STARTED`。
+
+### 4. DEV-S4-04 并发测试重复运行机制（repeat.mjs）与本地/CI 执行方案
+
+- **决定**：
+  - 新增原生 Node.js 执行脚本 `scripts/repeat.mjs`，不引入第三方依赖，采用 `spawnSync` 顺序执行子命令，任何一次迭代失败立即终止，输出失败迭代序号、执行命令与子进程退出码；
+  - **运行方案**：
+    - 本地门禁：`pnpm gate` 内运行单次完整并发测试套件（`pnpm test:concurrency`）；本地高强度验证执行 20 次重复（`node scripts/repeat.mjs 20 -- pnpm test:concurrency`）；
+    - CI 门禁：`.github/workflows/ci.yml` 中的 `concurrency-tests` Job 采用 `node scripts/repeat.mjs 5 -- pnpm test:concurrency` 连续重复执行 5 次，确保在受限容器环境下无并发时序闪烁。
+
+### 5. DEV-S4-05 M1–M6 变异实验结果记录
+
+- **M1（删除 lockEventAndReadClock 中的 .for("update") 行锁）**：
+  - 结果：**变红**。C7 锁互斥测试失败（观察者因 B 无需等待直接提交而超时）；
+  - **关键实验观察数字（README 素材）**：在移除活动行锁的情况下执行 C1（50 并发抢 10 个名额），最终确认报名数由预期的 10 人激增至 47 人（超卖 37 人），INV-1 核心不变式被确凿破坏；C4 并发取消与报名同样发生严重状态错乱。变异代码已完全恢复。
+- **M2（将独立时钟读取 clock_timestamp() 替换为事务启动时间 now()）**：
+  - 结果：**变红**。C6 等锁交错用例（Part 5: deterministic lock interleaving）失败：事务 B 在等待 A 释放活动行锁期间，A 将截止时间推进到当前物理时间；B 获锁后若使用 `now()`，读到的仍是事务 B 启动时的旧时间戳（早于截止时间），错误放行了逾期报名（返回 201 而非 409 `REGISTRATION_CLOSED`）；
+  - **核验补充说明**：变异执行前已通过 `waitForLockWait` 严格确认事务 B 在 `pg_stat_activity` / `pg_locks` 中真实处于等待 PID A 的锁阻塞状态；其余静态 C6 用例（如设置历史 10 分钟或 1 小时）因事务启动时间与物理时间均已过截止期，未受 `now()` 影响保持绿灯，证实必须依赖行锁等待交错实验方能区分 `clock_timestamp()` 与 `now()`。变异代码已完全恢复。
+- **M3（将候补递补排序 seq ASC 改为 seq DESC）**：
+  - 结果：**变红**。C3 用例失败：取消确认报名后，系统递补了候补队列中最晚加入（seq 最大）的用户，违反 FIFO 不变式 INV-3；C5 名额调大递补测试同样变红。变异代码已完全恢复。
+- **M4a（取消报名按 id 过滤时去掉 event_id 条件）**：
+  - 结果：**变红**。C8 与 A1 失败：使用同组织内错误活动 ID 与目标报名 ID 发起取消时，未能返回 404 `NOT_FOUND`，破坏了活动边界防护。变异代码已完全恢复。
+- **M4b（取消报名按 id 过滤时去掉 organization_id 条件）**：
+  - 结果：**行为测试未捕获**。
+  - **原因分析**：由于前置查询中已有 `event_id` 过滤，且数据库物理 schema 存在 `(event_id, organization_id)` 复合外键强制约束，一个特定 `event_id` 在物理上不可能跨组织存在；因此在现有行为测试用例下未表现为失败。如实记录为“行为测试未捕获”。
+  - **防御证明（grep 证据）**：通过源码静态审查与严格 grep 核验，确认 `apps/api/src/registrations.ts` 与 `apps/api/src/event-tx.ts` 中涉及 `registrations` 的全部 7 处查询、插入与更新操作均显式包含 `organization_id` 与 `event_id` 双重过滤。变异代码已完全恢复。
+- **M5（将时间检查 assertNotStarted 置于状态检查 assertNotCancelled 之前）**：
+  - 结果：**变红**。C6 优先级用例失败：对于既处于 `cancelled` 状态又已过 `starts_at` 的活动，系统错误返回了 409 `EVENT_STARTED`，而非 PRD 规定的更高优先级的 409 `EVENT_CANCELLED`。变异代码已完全恢复。
+- **M6（删除取消报名中“已是 cancelled 则提前 noop”的短路分支）**：
+  - 结果：**变红**。C8 与 A1 重复取消断言失败：对已取消的报名记录再次执行取消时，若未提前 noop，会导致 UPDATE 再次执行并刷新 `cancelled_at` 时间戳，导致取消前后的全列比对失败。变异代码已完全恢复。
+
+### 6. DEV-S4-06 审查确认的未验证项与证据缺口
+
+- **G2–G4 类型守卫负向实验（未验证 / UNVERIFIED，证据缺口保留）**：
+  - `apps/web/src/types/api-client-guard.ts` 中当前已包含针对 PATCH 与 DELETE 等路由的正向类型守卫断言（`NotAny`、`Equal` 等）；
+  - G2（`AppType` 故意退化为 `any`/`unknown`/`{}`）、G3（故意写错路径参数键触发类型报错）、G4（仅由 CI 中 `next build` 捕获的专属红对照）仍未进行独立负向破坏性验证，继续作为证据缺口记录；
+  - 澄清：G2–G4 属于前端客户端类型的负向控制实验，非部署、非压测。
+
+### 7. DEV-S4-07 S3 遗留问题核验结果（不记录缺陷）
+
+- **核验结论**：P0 侦察与 A1 集成测试确凿证实，`POST /api/orgs/:orgId/events/:eventId/registrations` 路由在收到格式非法的 `eventId` 时，由 Zod OpenAPI 的 `defaultHook` 在应用层直接捕获，返回标准 HTTP 400 `{ error: { code: "VALIDATION", message: "..." } }`，不会穿透至 PostgreSQL 引发 `22P02 invalid input syntax for type uuid` 的 500 异常；因此不记录 S3 遗留问题。
