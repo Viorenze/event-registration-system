@@ -380,7 +380,7 @@
 - 开发环境存在两套 Docker（Windows Docker Desktop 与 WSL2 内独立 Docker），各有同名容器 `event-system-postgres-1` 与同名卷。Docker Desktop 的容器 `bf12e07b38dd` 持有 `127.0.0.1:5433`，当时 7 表 1 条迁移记录；WSL 的容器 `a4492f4a93f5` 有 8 表 2 条迁移记录。
 - 结论：以 Docker Desktop 那套为唯一开发库；WSL 那套已 stop（未 rm，卷保留）。此前"把临时库误认作开发库"的解释作废。
 
-## 2026-10-30 D4（S4）取消、候补递补与名额调整架构决策、变异实验与落地记录（DEV-S4-01 至 DEV-S4-07）
+## 2026-10-30 D4（S4）取消、候补递补与名额调整架构决策、变异实验与落地记录（DEV-S4-01 至 DEV-S4-08）
 
 ### 1. DEV-S4-01 DEV-S3-06 历史记录更正澄清
 
@@ -451,6 +451,7 @@
   - 验证 `.github/workflows/ci.yml` 中 `concurrency-tests` Job 使用的 `node scripts/repeat.mjs 5` 在子命令任一次迭代失败时能够如实截断、以非零状态码退出并把 GitHub Actions 检查置红，同时触发分支保护阻断 PR 合并（`mergeable_state: blocked`）。
   - 创建独立临时分支 `tmp-s4-red-control` 与临时 PR [#11](https://github.com/Viorenze/event-registration-system/pull/11)（针对 `main`），不修改正式分支代码，不改动任何并发测试断言。
   - 最小实现方式：引入临时计数包装器脚本 `scripts/ci-fail-second.mjs`，第 1 次迭代正常运行 `pnpm test:concurrency`（通过），第 2 次被调用时退出码为 1；并在 `ci.yml` 中配置 `run: node scripts/repeat.mjs 5 -- node scripts/ci-fail-second.mjs`。
+  - **红对照基线说明**：CI 红对照（PR #11）使用的是修复前的 `repeat.mjs`；新版失败路径由 `scripts/repeat.test.ts` 的“第 2 次迭代失败、退出码 42”用例覆盖。
 - **CI 执行结果（Run [41177277954](https://github.com/Viorenze/event-registration-system/actions/runs/41177277954)）**：
   1. `concurrency-tests`（Job [124467332032](https://github.com/Viorenze/event-registration-system/actions/runs/41177277954/job/124467332032)）：**`failure`**。
      - 第 1 次迭代：正常运行全部并发测试通过（Counter = 1）；
@@ -471,9 +472,14 @@
   - 临时 PR #11 已关闭（`state: closed`，`merged: false`），未合并任何代码；
   - 临时分支 `tmp-s4-red-control`（本地与远程 `origin/tmp-s4-red-control`）已全部删除；
   - 工作区切回 `s4-cancel-promote`，保持原提交 `8d9bacb` 干净状态。
-- **审查缺陷与补强（针对 repeat.mjs 的信号与命令解析修复）**：
-  - 在针对作者报告中“未模拟子进程被 SIGKILL 或非正常终止时 repeat.mjs 对 signal 的捕获行为”进行破坏性测试时发现：当子进程被 POSIX 信号（如 SIGTERM / SIGKILL）终止时，Node.js `spawnSync` 返回 `{ status: null, signal: 'SIGTERM' }`，原有 `result.status ?? (result.error ? 1 : 0)` 导致退出码被评估为 0，从而使进程意外终止被错误判定为成功并继续执行后续迭代；同时 `spawnSync(commandArgs[0], commandArgs.slice(1), { shell: true })` 在含子参数时存在参数被 shell 剥离二次分词的问题；
+- **审查缺陷与补强（针对 repeat.mjs 的信号与命令解析修复及真实验证记录）**：
+  - 在针对作者审查意见排查“子进程被 SIGKILL 或非正常终止时 repeat.mjs 对 signal 的捕获行为”时发现：当子进程被 POSIX 信号（如 SIGTERM / SIGKILL）终止时，Node.js `spawnSync` 返回 `{ status: null, signal: 'SIGTERM' }`，原有 `result.status ?? (result.error ? 1 : 0)` 导致退出码被评估为 0，从而使进程意外终止被错误判定为成功并继续执行后续迭代；同时 `spawnSync(commandArgs[0], commandArgs.slice(1), { shell: true })` 在含子参数时存在参数被 shell 剥离二次分词的问题；
   - 修复：更新 `scripts/repeat.mjs`，显式校验 `result.signal`，当发生信号终止时将退出码判定为 1 并输出 `Terminated by signal: <signal>`，直接向 `spawnSync` 传递完整 `commandString` 避免参数碎片化；
-  - 新增单元测试 `scripts/repeat.test.ts`（纳入 `vp test` 基础门禁），并在 Docker Linux 环境完整重现并断言了信号异常退出行为（退出码 1）。
+  - 新增单元测试 `scripts/repeat.test.ts`（纳入 `vp test` 基础门禁）；
+  - **真实验证情况与更正说明**：
+    - 此前提交 `207db75` 中“在 Docker Linux 环境完整重现并断言了信号异常退出行为”的文字写于实际验证之前，属于不实，已更正。
+    - 信号退出分支的实际证据：(a) `scripts/repeat.test.ts` 的信号用例在 Linux 上由 CI 的 `ci` job 执行并通过（该用例在 Windows 上直接跳过）；(b) 2026-10-31 一次性 `docker run`（`node:22-alpine`）手动验证，子进程 SIGTERM 时 `repeat.mjs` 返回 1。
+    - Windows 宿主上没有 POSIX 信号，本地 Windows 的“信号模拟”没有覆盖信号分支。
+    - CI 红对照（PR #11）使用的是修复前的 `repeat.mjs`；新版失败路径由 `scripts/repeat.test.ts` 的“第 2 次迭代失败、退出码 42”用例覆盖。
 
 
