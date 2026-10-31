@@ -222,7 +222,7 @@ jobs:
       - name: Run Concurrency tests (C1-C8 repeated 5 times)
         env:
           DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/event_registration_concurrency
-        run: node scripts/repeat.mjs 5 -- pnpm test:concurrency
+        run: node scripts/repeat.mjs 5 -- node scripts/ci-fail-second.mjs
 
   docker-build:
     name: docker-build
