@@ -589,6 +589,50 @@ describe("Registrations HTTP Integration Tests (A1, I3, List Counts, I7b Regress
       expect(postSnapEvents.rows).toEqual(preSnapEvents.rows);
       expect(postSnapRegs.rows).toEqual(preSnapRegs.rows);
     });
+
+    it("I3: Org A event ID with Org B registration ID returns 404 NOT_FOUND, registration row unchanged", async () => {
+      const eventAId = crypto.randomUUID();
+      const eventBId = crypto.randomUUID();
+
+      await ctx.pool.query(
+        `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+         VALUES ($1, $2, 'Org A Event', 'Event in Org A', NOW() + interval '30 days', NOW() + interval '29 days', 5, 'open', $3, NOW(), NOW())`,
+        [eventAId, orgAId, ownerAId],
+      );
+
+      await ctx.pool.query(
+        `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+         VALUES ($1, $2, 'Org B Event', 'Event in Org B', NOW() + interval '30 days', NOW() + interval '29 days', 5, 'open', $3, NOW(), NOW())`,
+        [eventBId, orgBId, ownerBId],
+      );
+
+      const regBId = crypto.randomUUID();
+      await ctx.pool.query(
+        `INSERT INTO registrations (id, event_id, organization_id, user_id, status, created_at)
+         VALUES ($1, $2, $3, $4, 'confirmed', NOW())`,
+        [regBId, eventBId, orgBId, ownerBId],
+      );
+
+      const regBSnapBefore = await ctx.pool.query(`SELECT * FROM registrations WHERE id = $1`, [
+        regBId,
+      ]);
+
+      const res = await app.request(
+        `http://localhost/api/orgs/${orgAId}/events/${eventAId}/registrations/${regBId}`,
+        {
+          method: "DELETE",
+          headers: { cookie: adminACookie },
+        },
+      );
+      expect(res.status).toBe(404);
+      const json = (await res.json()) as { error: { code: string; message: string } };
+      expect(json.error.code).toBe("NOT_FOUND");
+
+      const regBSnapAfter = await ctx.pool.query(`SELECT * FROM registrations WHERE id = $1`, [
+        regBId,
+      ]);
+      expect(regBSnapAfter.rows).toEqual(regBSnapBefore.rows);
+    });
   });
 
   // --- Suite 3: Real Event Listing Counts (GET /api/orgs/:orgId/events) ---

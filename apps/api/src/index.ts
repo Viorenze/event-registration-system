@@ -4,7 +4,8 @@ import { asc, eq, events, member, sql, user } from "@event-system/db";
 import { auth, db } from "./auth.ts";
 import { errorResponseSchema, orgAuthMiddleware, requireRole } from "./auth-middleware.ts";
 import { parseEnv } from "./env.ts";
-import { DomainError, register } from "./registrations.ts";
+import { cancel, cancelEvent, register, updateEvent } from "./registrations.ts";
+import { respondWithError } from "./http-errors.ts";
 
 export const env = parseEnv(process.env);
 
@@ -310,6 +311,303 @@ const createRegistrationRoute = createRoute({
   },
 });
 
+const deleteRegistrationMeRoute = createRoute({
+  method: "delete",
+  path: "/api/orgs/{orgId}/events/{eventId}/registrations/me",
+  middleware: [requireRole("member")] as const,
+  request: {
+    params: z.object({
+      orgId: z.string(),
+      eventId: z.string().uuid("Invalid eventId format"),
+    }),
+  },
+  responses: {
+    204: {
+      description: "Registration cancelled or idempotent noop",
+    },
+    400: {
+      description: "Validation error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    401: {
+      description: "Unauthenticated",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    403: {
+      description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Not Found",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    409: {
+      description: "Conflict / Business Rule Rejected",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal Server Error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+const deleteRegistrationRoute = createRoute({
+  method: "delete",
+  path: "/api/orgs/{orgId}/events/{eventId}/registrations/{registrationId}",
+  middleware: [requireRole("admin")] as const,
+  request: {
+    params: z.object({
+      orgId: z.string(),
+      eventId: z.string().uuid("Invalid eventId format"),
+      registrationId: z.string().uuid("Invalid registrationId format"),
+    }),
+  },
+  responses: {
+    204: {
+      description: "Registration cancelled or idempotent noop",
+    },
+    400: {
+      description: "Validation error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    401: {
+      description: "Unauthenticated",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    403: {
+      description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Not Found",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    409: {
+      description: "Conflict / Business Rule Rejected",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal Server Error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+const updateEventRoute = createRoute({
+  method: "patch",
+  path: "/api/orgs/{orgId}/events/{eventId}",
+  middleware: [requireRole("admin")] as const,
+  request: {
+    params: z.object({
+      orgId: z.string(),
+      eventId: z.string().uuid("Invalid eventId format"),
+    }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              title: z
+                .string()
+                .trim()
+                .min(1, "title is required")
+                .max(120, "title too long")
+                .optional(),
+              description: z.string().max(2000, "description too long").nullable().optional(),
+              capacity: z
+                .number()
+                .int("capacity must be an integer")
+                .min(1, "capacity must be at least 1")
+                .max(1000, "capacity cannot exceed 1000")
+                .optional(),
+            })
+            .strict()
+            .refine((data) => Object.keys(data).length > 0, {
+              message: "At least one field is required",
+            }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Event updated successfully",
+      content: {
+        "application/json": {
+          schema: eventResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: "Validation error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    401: {
+      description: "Unauthenticated",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    403: {
+      description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Not Found",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    409: {
+      description: "Conflict / Business Rule Rejected",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal Server Error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+const cancelEventRoute = createRoute({
+  method: "post",
+  path: "/api/orgs/{orgId}/events/{eventId}/cancel",
+  middleware: [requireRole("admin")] as const,
+  request: {
+    params: z.object({
+      orgId: z.string(),
+      eventId: z.string().uuid("Invalid eventId format"),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Event cancelled successfully",
+      content: {
+        "application/json": {
+          schema: eventResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: "Validation error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    401: {
+      description: "Unauthenticated",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    403: {
+      description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Not Found",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    409: {
+      description: "Conflict / Business Rule Rejected",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal Server Error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
 const baseApp = new OpenAPIHono({
   defaultHook: (result, c) => {
     if (!result.success) {
@@ -489,26 +787,76 @@ export const app = baseApp
 
       return c.json(responseBody, isCreated ? 201 : 200);
     } catch (err) {
-      if (err instanceof DomainError) {
-        if (err.code === "NOT_FOUND") {
-          return c.json({ error: { code: "NOT_FOUND", message: err.message } }, 404);
-        }
-        if (
-          err.code === "REGISTRATION_CLOSED" ||
-          err.code === "EVENT_STARTED" ||
-          err.code === "EVENT_CANCELLED" ||
-          err.code === "CAPACITY_BELOW_CONFIRMED"
-        ) {
-          return c.json({ error: { code: err.code, message: err.message } }, 409);
-        }
-        if (err.code === "VALIDATION") {
-          return c.json({ error: { code: "VALIDATION", message: err.message } }, 400);
-        }
-      }
-      return c.json(
-        { error: { code: "INTERNAL_ERROR", message: "Failed to register for event" } },
-        500,
+      return respondWithError(c, err, "Failed to register for event");
+    }
+  })
+  .openapi(deleteRegistrationMeRoute, async (c) => {
+    const { orgId, eventId } = c.req.valid("param");
+    const sessionUser = c.get("user") as { id: string };
+    const memberRole = (c.get("memberRole") as string) ?? "member";
+
+    try {
+      await cancel(db, orgId, eventId, { me: true }, { userId: sessionUser.id, role: memberRole });
+      return c.body(null, 204);
+    } catch (err) {
+      return respondWithError(c, err, "Failed to cancel registration");
+    }
+  })
+  .openapi(deleteRegistrationRoute, async (c) => {
+    const { orgId, eventId, registrationId } = c.req.valid("param");
+    const sessionUser = c.get("user") as { id: string };
+    const memberRole = (c.get("memberRole") as string) ?? "admin";
+
+    try {
+      await cancel(
+        db,
+        orgId,
+        eventId,
+        { registrationId },
+        { userId: sessionUser.id, role: memberRole },
       );
+      return c.body(null, 204);
+    } catch (err) {
+      return respondWithError(c, err, "Failed to cancel registration");
+    }
+  })
+  .openapi(updateEventRoute, async (c) => {
+    const { orgId, eventId } = c.req.valid("param");
+    const body = c.req.valid("json");
+
+    try {
+      const updated = await updateEvent(db, orgId, eventId, body);
+      return c.json(
+        {
+          ...updated,
+          startsAt: updated.startsAt.toISOString(),
+          registrationDeadline: updated.registrationDeadline.toISOString(),
+          createdAt: updated.createdAt.toISOString(),
+          updatedAt: updated.updatedAt.toISOString(),
+        },
+        200,
+      );
+    } catch (err) {
+      return respondWithError(c, err, "Failed to update event");
+    }
+  })
+  .openapi(cancelEventRoute, async (c) => {
+    const { orgId, eventId } = c.req.valid("param");
+
+    try {
+      const cancelled = await cancelEvent(db, orgId, eventId);
+      return c.json(
+        {
+          ...cancelled,
+          startsAt: cancelled.startsAt.toISOString(),
+          registrationDeadline: cancelled.registrationDeadline.toISOString(),
+          createdAt: cancelled.createdAt.toISOString(),
+          updatedAt: cancelled.updatedAt.toISOString(),
+        },
+        200,
+      );
+    } catch (err) {
+      return respondWithError(c, err, "Failed to cancel event");
     }
   })
   .doc("/doc", {
