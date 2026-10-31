@@ -408,7 +408,7 @@
 ### 4. DEV-S4-04 并发测试重复运行机制（repeat.mjs）与本地/CI 执行方案
 
 - **决定**：
-  - 新增原生 Node.js 执行脚本 `scripts/repeat.mjs`，不引入第三方依赖，采用 `spawnSync` 顺序执行子命令，任何一次迭代失败立即终止，输出失败迭代序号、执行命令与子进程退出码；
+  - 新增原生 Node.js 执行脚本 `scripts/repeat.mjs`，不引入第三方依赖，采用 `spawnSync` 顺序执行子命令，任何一次迭代失败立即终止，输出失败迭代序号、执行命令与子进程退出码；经审查修复了当子进程被 POSIX 信号（如 SIGTERM/SIGKILL）异常终止时 `result.status` 为 `null` 导致退出码被错误判定为 0 的缺陷，确保信号终止与非零退出码均如实阻断并报告；
   - **运行方案**：
     - 本地门禁：`pnpm gate` 内运行单次完整并发测试套件（`pnpm test:concurrency`）；本地高强度验证执行 20 次重复（`node scripts/repeat.mjs 20 -- pnpm test:concurrency`）；
     - CI 门禁：`.github/workflows/ci.yml` 中的 `concurrency-tests` Job 采用 `node scripts/repeat.mjs 5 -- pnpm test:concurrency` 连续重复执行 5 次，确保在受限容器环境下无并发时序闪烁。
@@ -470,5 +470,10 @@
 - **收尾与清理**：
   - 临时 PR #11 已关闭（`state: closed`，`merged: false`），未合并任何代码；
   - 临时分支 `tmp-s4-red-control`（本地与远程 `origin/tmp-s4-red-control`）已全部删除；
-  - 工作区切回 `s4-cancel-promote`，保持原提交 `8d9bacb` 干净状态，本次追加仅记录文档，不修改任何业务代码。
+  - 工作区切回 `s4-cancel-promote`，保持原提交 `8d9bacb` 干净状态。
+- **审查缺陷与补强（针对 repeat.mjs 的信号与命令解析修复）**：
+  - 在针对作者报告中“未模拟子进程被 SIGKILL 或非正常终止时 repeat.mjs 对 signal 的捕获行为”进行破坏性测试时发现：当子进程被 POSIX 信号（如 SIGTERM / SIGKILL）终止时，Node.js `spawnSync` 返回 `{ status: null, signal: 'SIGTERM' }`，原有 `result.status ?? (result.error ? 1 : 0)` 导致退出码被评估为 0，从而使进程意外终止被错误判定为成功并继续执行后续迭代；同时 `spawnSync(commandArgs[0], commandArgs.slice(1), { shell: true })` 在含子参数时存在参数被 shell 剥离二次分词的问题；
+  - 修复：更新 `scripts/repeat.mjs`，显式校验 `result.signal`，当发生信号终止时将退出码判定为 1 并输出 `Terminated by signal: <signal>`，直接向 `spawnSync` 传递完整 `commandString` 避免参数碎片化；
+  - 新增单元测试 `scripts/repeat.test.ts`（纳入 `vp test` 基础门禁），并在 Docker Linux 环境完整重现并断言了信号异常退出行为（退出码 1）。
+
 

@@ -23,17 +23,23 @@ console.log(`[repeat] Repeating command ${count} times: ${commandString}`);
 
 for (let i = 1; i <= count; i++) {
   console.log(`\n[repeat] === Iteration ${i} / ${count} ===`);
-  const result = spawnSync(commandArgs[0], commandArgs.slice(1), {
+  const result = spawnSync(commandString, {
     stdio: "inherit",
     shell: true,
   });
 
-  const exitCode = result.status ?? (result.error ? 1 : 0);
-  if (exitCode !== 0) {
+  const exitCode =
+    result.status !== null ? result.status : result.signal ? 1 : result.error ? 1 : 0;
+
+  if (exitCode !== 0 || result.signal) {
+    const finalExitCode = exitCode !== 0 ? exitCode : 1;
     console.error(`\n[repeat] Command failed at iteration ${i} of ${count}`);
-    console.error(`[repeat] Command: ${commandString}`);
-    console.error(`[repeat] Exit code: ${exitCode}`);
-    process.exit(exitCode);
+    console.error(`\n[repeat] Command: ${commandString}`);
+    if (result.signal) {
+      console.error(`[repeat] Terminated by signal: ${result.signal}`);
+    }
+    console.error(`\n[repeat] Exit code: ${finalExitCode}`);
+    process.exit(finalExitCode);
   }
 }
 
