@@ -444,3 +444,31 @@
 ### 7. DEV-S4-07 S3 遗留问题核验结果（不记录缺陷）
 
 - **核验结论**：P0 侦察与 A1 集成测试确凿证实，`POST /api/orgs/:orgId/events/:eventId/registrations` 路由在收到格式非法的 `eventId` 时，由 Zod OpenAPI 的 `defaultHook` 在应用层直接捕获，返回标准 HTTP 400 `{ error: { code: "VALIDATION", message: "..." } }`，不会穿透至 PostgreSQL 引发 `22P02 invalid input syntax for type uuid` 的 500 异常；因此不记录 S3 遗留问题。
+
+### 8. DEV-S4-08 CI 并发测试红对照真实结果（针对 repeat.mjs）
+
+- **目标与验证方案**：
+  - 验证 `.github/workflows/ci.yml` 中 `concurrency-tests` Job 使用的 `node scripts/repeat.mjs 5` 在子命令任一次迭代失败时能够如实截断、以非零状态码退出并把 GitHub Actions 检查置红，同时触发分支保护阻断 PR 合并（`mergeable_state: blocked`）。
+  - 创建独立临时分支 `tmp-s4-red-control` 与临时 PR [#11](https://github.com/Viorenze/event-registration-system/pull/11)（针对 `main`），不修改正式分支代码，不改动任何并发测试断言。
+  - 最小实现方式：引入临时计数包装器脚本 `scripts/ci-fail-second.mjs`，第 1 次迭代正常运行 `pnpm test:concurrency`（通过），第 2 次被调用时退出码为 1；并在 `ci.yml` 中配置 `run: node scripts/repeat.mjs 5 -- node scripts/ci-fail-second.mjs`。
+- **CI 执行结果（Run [41177277954](https://github.com/Viorenze/event-registration-system/actions/runs/41177277954)）**：
+  1. `concurrency-tests`（Job [124467332032](https://github.com/Viorenze/event-registration-system/actions/runs/41177277954/job/124467332032)）：**`failure`**。
+     - 第 1 次迭代：正常运行全部并发测试通过（Counter = 1）；
+     - 第 2 次迭代：包装脚本触发第 2 次调用（Counter = 2），输出 `[ci-fail-second] Intentional failure on iteration 2` 并退出 1；
+     - `repeat.mjs` 准确捕获并输出：
+       - `[repeat] Command failed at iteration 2 of 5`
+       - `[repeat] Command: node scripts/ci-fail-second.mjs`
+       - `[repeat] Exit code: 1`
+     - 步骤以退出码 1 终止，后续迭代未执行，Job 标记为 `failure`；
+  2. 其余 4 个检查结果全部为 **`success`**：
+     - `ci`：`success`（Job 124467332127）
+     - `empty-db-migration`：`success`（Job 124467332084）
+     - `integration-tests`：`success`（Job 124467331908）
+     - `docker-build`：`success`（Job 124467332105）
+  3. PR 状态与分支保护：
+     - PR #11 的 `mergeable_state` 准确呈现为 **`blocked`**，确认必需状态检查失败阻断合并。
+- **收尾与清理**：
+  - 临时 PR #11 已关闭（`state: closed`，`merged: false`），未合并任何代码；
+  - 临时分支 `tmp-s4-red-control`（本地与远程 `origin/tmp-s4-red-control`）已全部删除；
+  - 工作区切回 `s4-cancel-promote`，保持原提交 `8d9bacb` 干净状态，本次追加仅记录文档，不修改任何业务代码。
+
