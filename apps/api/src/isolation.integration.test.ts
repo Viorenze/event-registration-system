@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { setupTestDatabase, type TestDatabaseContext } from "./test-helper.ts";
 import { routesTable } from "./routes-table.ts";
 import { exemptionsList } from "./routes-exemptions.ts";
+import { getRouteFixture } from "./test-helpers/route-fixtures.ts";
 
 let app: typeof import("./index.ts").app;
 let db: typeof import("./auth.ts").db;
@@ -14,6 +15,10 @@ describe("T2: Auth Middleware, Route Table Integrity & Isolation Tests (I1, I2, 
   let userB_OwnerCookie: string;
   let orgAId: string;
   let orgBId: string;
+  let eventAId: string;
+  let regAId: string;
+  let eventBId: string;
+  let regBId: string;
 
   beforeAll(async () => {
     ctx = await setupTestDatabase();
@@ -98,6 +103,34 @@ describe("T2: Auth Middleware, Route Table Integrity & Isolation Tests (I1, I2, 
     // Add admin and member to Org A
     await addMember(orgAId, adminA.userId, "admin");
     await addMember(orgAId, memberA.userId, "member");
+
+    // Create event and registration in Org A
+    eventAId = crypto.randomUUID();
+    await ctx.pool.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '10 days', NOW() + interval '5 days', 10, 'open', $5, NOW(), NOW())`,
+      [eventAId, orgAId, "Event A", "Event in Org A", ownerA.userId],
+    );
+    regAId = crypto.randomUUID();
+    await ctx.pool.query(
+      `INSERT INTO registrations (id, organization_id, event_id, user_id, status, created_at)
+       VALUES ($1, $2, $3, $4, 'confirmed', NOW())`,
+      [regAId, orgAId, eventAId, memberA.userId],
+    );
+
+    // Create event and registration in Org B
+    eventBId = crypto.randomUUID();
+    await ctx.pool.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '10 days', NOW() + interval '5 days', 10, 'open', $5, NOW(), NOW())`,
+      [eventBId, orgBId, "Event B", "Event in Org B", ownerB.userId],
+    );
+    regBId = crypto.randomUUID();
+    await ctx.pool.query(
+      `INSERT INTO registrations (id, organization_id, event_id, user_id, status, created_at)
+       VALUES ($1, $2, $3, $4, 'confirmed', NOW())`,
+      [regBId, orgBId, eventBId, ownerB.userId],
+    );
   });
 
   afterAll(async () => {
@@ -141,17 +174,33 @@ describe("T2: Auth Middleware, Route Table Integrity & Isolation Tests (I1, I2, 
     });
   });
 
+  it("ensures every route in routesTable has a registered fixture", () => {
+    for (const route of routesTable) {
+      const fixture = getRouteFixture(route, {
+        orgId: orgAId,
+        eventId: eventAId,
+        registrationId: regAId,
+      });
+      expect(fixture).toBeDefined();
+      expect(fixture.path).toBeDefined();
+    }
+  });
+
   describe("I2: Organization isolation returns 403 and leaves DB unchanged", () => {
     async function getDbSnapshot() {
-      const [orgs, members, invitations] = await Promise.all([
-        ctx.pool.query('SELECT count(*)::int as c FROM "organization"'),
-        ctx.pool.query('SELECT count(*)::int as c FROM "member"'),
-        ctx.pool.query('SELECT count(*)::int as c FROM "invitation"'),
+      const [orgs, invitations, members, events, regs] = await Promise.all([
+        ctx.pool.query('SELECT * FROM "organization" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "invitation" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "member" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "events" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "registrations" ORDER BY id'),
       ]);
       return {
-        orgCount: orgs.rows[0].c,
-        memberCount: members.rows[0].c,
-        invitationCount: invitations.rows[0].c,
+        organizations: orgs.rows,
+        invitations: invitations.rows,
+        members: members.rows,
+        events: events.rows,
+        registrations: regs.rows,
       };
     }
 
@@ -185,6 +234,48 @@ describe("T2: Auth Middleware, Route Table Integrity & Isolation Tests (I1, I2, 
       expect(snapAfter).toEqual(snapBefore);
     });
 
+    const callers = [
+      { role: "member", getCookie: () => userA_MemberCookie },
+      { role: "admin", getCookie: () => userA_AdminCookie },
+      { role: "owner", getCookie: () => userA_OwnerCookie },
+    ];
+
+    for (const caller of callers) {
+      it.each(routesTable)(
+        `rejects Org A ${caller.role} accessing Org B route $method $path with 403 and leaves DB unchanged`,
+        async (route) => {
+          const snapBefore = await getDbSnapshot();
+
+          const fixture = getRouteFixture(route, {
+            orgId: orgBId,
+            eventId: eventBId,
+            registrationId: regBId,
+          });
+
+          const res = await app.request(`http://localhost${fixture.path}`, {
+            method: fixture.method,
+            headers: {
+              cookie: caller.getCookie(),
+              ...fixture.headers,
+            },
+            ...(fixture.body ? { body: JSON.stringify(fixture.body) } : {}),
+          });
+
+          expect(res.status).toBe(403);
+          const body = (await res.json()) as { error: { code: string; message: string } };
+          expect(body).toEqual({
+            error: {
+              code: "FORBIDDEN",
+              message: expect.any(String),
+            },
+          });
+
+          const snapAfter = await getDbSnapshot();
+          expect(snapAfter).toEqual(snapBefore);
+        },
+      );
+    }
+
     it("returns 403 when orgId does not exist", async () => {
       const nonExistentOrgId = "non_existent_org_999999";
       const res = await app.request(`http://localhost/api/orgs/${nonExistentOrgId}/members`, {
@@ -216,6 +307,141 @@ describe("T2: Auth Middleware, Route Table Integrity & Isolation Tests (I1, I2, 
         },
       });
     });
+
+    // I2 supplement: non-member calling routes with invalid UUID path params returns 403 FORBIDDEN, not 400
+    const routesWithParams = routesTable.filter((r) => r.path.includes(":eventId"));
+    it.each(routesWithParams)(
+      "I2 supplement: non-member calling $method $path with invalid UUID path params returns 403 FORBIDDEN, not 400",
+      async (route) => {
+        const snapBefore = await getDbSnapshot();
+
+        const fixture = getRouteFixture(route, {
+          orgId: orgBId,
+          eventId: eventBId,
+          registrationId: regBId,
+          overrideParams: {
+            eventId: "not-a-valid-uuid",
+            registrationId: "not-a-valid-uuid",
+          },
+        });
+
+        const res = await app.request(`http://localhost${fixture.path}`, {
+          method: fixture.method,
+          headers: {
+            cookie: userA_MemberCookie,
+            ...fixture.headers,
+          },
+          ...(fixture.body ? { body: JSON.stringify(fixture.body) } : {}),
+        });
+
+        expect(res.status).toBe(403);
+        const body = (await res.json()) as { error: { code: string; message: string } };
+        expect(body.error.code).toBe("FORBIDDEN");
+
+        const snapAfter = await getDbSnapshot();
+        expect(snapAfter).toEqual(snapBefore);
+      },
+    );
+  });
+
+  describe("I3: Cross-organization eventId access returns 404 NOT_FOUND and leaves DB unchanged", () => {
+    async function getDbSnapshot() {
+      const [orgs, invitations, members, events, regs] = await Promise.all([
+        ctx.pool.query('SELECT * FROM "organization" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "invitation" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "member" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "events" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "registrations" ORDER BY id'),
+      ]);
+      return {
+        organizations: orgs.rows,
+        invitations: invitations.rows,
+        members: members.rows,
+        events: events.rows,
+        registrations: regs.rows,
+      };
+    }
+
+    const routesWithEventId = routesTable.filter((r) => r.path.includes(":eventId"));
+
+    it.each(routesWithEventId)(
+      "Org A admin accessing /orgs/A/... with Org B eventId returns 404 for $method $path",
+      async (route) => {
+        const snapBefore = await getDbSnapshot();
+
+        const fixture = getRouteFixture(route, {
+          orgId: orgAId,
+          eventId: eventBId,
+          registrationId: regBId,
+        });
+
+        const res = await app.request(`http://localhost${fixture.path}`, {
+          method: fixture.method,
+          headers: {
+            cookie: userA_AdminCookie,
+            ...fixture.headers,
+          },
+          ...(fixture.body ? { body: JSON.stringify(fixture.body) } : {}),
+        });
+
+        expect(res.status).toBe(404);
+        const body = (await res.json()) as { error: { code: string; message: string } };
+        expect(body.error.code).toBe("NOT_FOUND");
+
+        const snapAfter = await getDbSnapshot();
+        expect(snapAfter).toEqual(snapBefore);
+      },
+    );
+  });
+
+  describe("I4: Member role attempting admin-only routes returns 403 and leaves DB unchanged", () => {
+    async function getDbSnapshot() {
+      const [orgs, invitations, members, events, regs] = await Promise.all([
+        ctx.pool.query('SELECT * FROM "organization" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "invitation" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "member" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "events" ORDER BY id'),
+        ctx.pool.query('SELECT * FROM "registrations" ORDER BY id'),
+      ]);
+      return {
+        organizations: orgs.rows,
+        invitations: invitations.rows,
+        members: members.rows,
+        events: events.rows,
+        registrations: regs.rows,
+      };
+    }
+
+    const adminRoutes = routesTable.filter((r) => r.minRole === "admin");
+
+    it.each(adminRoutes)(
+      "Org A member calling admin-only route $method $path returns 403 FORBIDDEN",
+      async (route) => {
+        const snapBefore = await getDbSnapshot();
+
+        const fixture = getRouteFixture(route, {
+          orgId: orgAId,
+          eventId: eventAId,
+          registrationId: regAId,
+        });
+
+        const res = await app.request(`http://localhost${fixture.path}`, {
+          method: fixture.method,
+          headers: {
+            cookie: userA_MemberCookie,
+            ...fixture.headers,
+          },
+          ...(fixture.body ? { body: JSON.stringify(fixture.body) } : {}),
+        });
+
+        expect(res.status).toBe(403);
+        const body = (await res.json()) as { error: { code: string; message: string } };
+        expect(body.error.code).toBe("FORBIDDEN");
+
+        const snapAfter = await getDbSnapshot();
+        expect(snapAfter).toEqual(snapBefore);
+      },
+    );
   });
 
   describe("I5: Route table integrity", () => {

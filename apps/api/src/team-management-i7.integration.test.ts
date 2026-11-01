@@ -283,6 +283,11 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
         },
       );
       expect(resUpdate.status).toBe(403);
+      const updateBody = (await resUpdate.json()) as { code: string; message: string };
+      expect(updateBody).toEqual({
+        code: "YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER",
+        message: expect.any(String),
+      });
 
       // Verify owner role in DB is STILL owner
       const checkOwnerRole = await ctx.pool.query('SELECT role FROM "member" WHERE id = $1', [
@@ -304,6 +309,11 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
         }),
       });
       expect(resRemove.status).toBe(400);
+      const removeBody = (await resRemove.json()) as { code: string; message: string };
+      expect(removeBody).toEqual({
+        code: "YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER",
+        message: expect.any(String),
+      });
 
       // Verify owner STILL exists in member table
       const checkOwnerStillExists = await ctx.pool.query(
@@ -311,6 +321,137 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
         [ownerMemberId],
       );
       expect(checkOwnerStillExists.rows[0].c).toBe(1);
+    });
+
+    it("organization with two owners: admin rejected when modifying or removing owner, while owner succeeds", async () => {
+      const owner1 = await registerUser("owner1-two@example.com", "Owner 1 Two");
+      const owner2 = await registerUser("owner2-two@example.com", "Owner 2 Two");
+      const admin = await registerUser("admin-two@example.com", "Admin Two");
+      const orgId = await createOrg(owner1.cookie, "Org Two Owners", "org-two-owners");
+
+      // Add owner2 as member first
+      const owner2MemberId = await addMember(orgId, owner2.userId, "member");
+      // Add admin
+      await addMember(orgId, admin.userId, "admin");
+
+      // Owner 1 promotes owner2 to owner
+      const resPromote = await app.request(
+        "http://localhost/api/auth/organization/update-member-role",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost:3000",
+            cookie: owner1.cookie,
+          },
+          body: JSON.stringify({
+            organizationId: orgId,
+            memberId: owner2MemberId,
+            role: "owner",
+          }),
+        },
+      );
+      expect(resPromote.status).toBe(200);
+
+      // Verify DB now has 2 owners
+      const ownersInDb = await ctx.pool.query(
+        "SELECT id, role FROM \"member\" WHERE organization_id = $1 AND role = 'owner'",
+        [orgId],
+      );
+      expect(ownersInDb.rows.length).toBe(2);
+
+      async function assertMembersUnchanged() {
+        const membersInDb = await ctx.pool.query<{ id: string; role: string; user_id: string }>(
+          'SELECT id, role, user_id FROM "member" WHERE organization_id = $1 ORDER BY id',
+          [orgId],
+        );
+        expect(membersInDb.rows.length).toBe(3);
+        expect(membersInDb.rows.find((m) => m.user_id === owner1.userId)?.role).toBe("owner");
+        expect(membersInDb.rows.find((m) => m.user_id === owner2.userId)?.role).toBe("owner");
+        expect(membersInDb.rows.find((m) => m.user_id === admin.userId)?.role).toBe("admin");
+      }
+
+      // 1. Admin tries to remove non-unique owner (owner2) -> rejected
+      const resAdminRemoveOwner = await app.request(
+        "http://localhost/api/auth/organization/remove-member",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost:3000",
+            cookie: admin.cookie,
+          },
+          body: JSON.stringify({
+            organizationId: orgId,
+            memberIdOrEmail: owner2MemberId,
+          }),
+        },
+      );
+      expect(resAdminRemoveOwner.status).toBe(400);
+      const adminRemoveOwnerBody = (await resAdminRemoveOwner.json()) as {
+        code: string;
+        message: string;
+      };
+      expect(adminRemoveOwnerBody).toEqual({
+        code: "YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER",
+        message: expect.any(String),
+      });
+      // Assert member table unchanged after rejected remove
+      await assertMembersUnchanged();
+
+      // 2. Admin tries to downgrade non-unique owner (owner2) to member -> rejected
+      const resAdminDowngradeOwner = await app.request(
+        "http://localhost/api/auth/organization/update-member-role",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost:3000",
+            cookie: admin.cookie,
+          },
+          body: JSON.stringify({
+            organizationId: orgId,
+            memberId: owner2MemberId,
+            role: "member",
+          }),
+        },
+      );
+      expect(resAdminDowngradeOwner.status).toBe(403);
+      const adminDowngradeOwnerBody = (await resAdminDowngradeOwner.json()) as {
+        code: string;
+        message: string;
+      };
+      expect(adminDowngradeOwnerBody).toEqual({
+        code: "YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER",
+        message: expect.any(String),
+      });
+      // Assert member table unchanged after rejected downgrade
+      await assertMembersUnchanged();
+
+      // 3. Control: Owner 1 downgrades owner2 to member -> succeeds
+      const resOwnerDowngrade = await app.request(
+        "http://localhost/api/auth/organization/update-member-role",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost:3000",
+            cookie: owner1.cookie,
+          },
+          body: JSON.stringify({
+            organizationId: orgId,
+            memberId: owner2MemberId,
+            role: "member",
+          }),
+        },
+      );
+      expect(resOwnerDowngrade.status).toBe(200);
+
+      // Verify owner2 is now member in DB
+      const checkOwner2After = await ctx.pool.query('SELECT role FROM "member" WHERE id = $1', [
+        owner2MemberId,
+      ]);
+      expect(checkOwner2After.rows[0].role).toBe("member");
     });
   });
 
@@ -348,7 +489,12 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
           }),
         },
       );
-      expect(resMemberUpdate.status).not.toBe(200);
+      expect(resMemberUpdate.status).toBe(403);
+      const memberUpdateBody = (await resMemberUpdate.json()) as { code: string; message: string };
+      expect(memberUpdateBody).toEqual({
+        code: "YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER",
+        message: expect.any(String),
+      });
 
       // 1.2 Rejection: Non-member (Org B owner) tries to update target1 role to admin
       const resNonMemberUpdate = await app.request(
@@ -367,7 +513,15 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
           }),
         },
       );
-      expect(resNonMemberUpdate.status).not.toBe(200);
+      expect(resNonMemberUpdate.status).toBe(400);
+      const nonMemberUpdateBody = (await resNonMemberUpdate.json()) as {
+        code: string;
+        message: string;
+      };
+      expect(nonMemberUpdateBody).toEqual({
+        code: "MEMBER_NOT_FOUND",
+        message: expect.any(String),
+      });
 
       // Target1 role must STILL be "member"
       const target1Check = await ctx.pool.query('SELECT role FROM "member" WHERE id = $1', [
@@ -414,7 +568,12 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
           body: JSON.stringify({ organizationId: orgAId, memberIdOrEmail: target2MemberId }),
         },
       );
-      expect(resMemberRemove.status).not.toBe(200);
+      expect(resMemberRemove.status).toBe(401);
+      const memberRemoveBody = (await resMemberRemove.json()) as { code: string; message: string };
+      expect(memberRemoveBody).toEqual({
+        code: "YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_MEMBER",
+        message: expect.any(String),
+      });
 
       // 2.2 Rejection: Non-member (Org B owner) tries to remove target2
       const resNonMemberRemove = await app.request(
@@ -429,7 +588,15 @@ describe("T4: I7 Better Auth Team Management Integration Tests (a, b, c, d)", ()
           body: JSON.stringify({ organizationId: orgAId, memberIdOrEmail: target2MemberId }),
         },
       );
-      expect(resNonMemberRemove.status).not.toBe(200);
+      expect(resNonMemberRemove.status).toBe(400);
+      const nonMemberRemoveBody = (await resNonMemberRemove.json()) as {
+        code: string;
+        message: string;
+      };
+      expect(nonMemberRemoveBody).toEqual({
+        code: "MEMBER_NOT_FOUND",
+        message: expect.any(String),
+      });
 
       // Target2 must STILL exist in member table
       const target2Check = await ctx.pool.query(

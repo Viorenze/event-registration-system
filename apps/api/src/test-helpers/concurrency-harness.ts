@@ -125,3 +125,33 @@ export async function assertInvariants(
     cancelledCount: cancelledRows.length,
   };
 }
+
+export async function assertFifoOrder(
+  client: pg.Client | pg.PoolClient | pg.Pool,
+  eventId: string,
+): Promise<void> {
+  const regRes = await client.query<{
+    id: string;
+    status: string;
+    seq: string | number;
+  }>(`SELECT id, status, seq FROM registrations WHERE event_id = $1 ORDER BY seq ASC`, [eventId]);
+
+  const confirmedRows = regRes.rows.filter((r) => r.status === "confirmed");
+  const waitlistedRows = regRes.rows.filter((r) => r.status === "waitlisted");
+
+  if (confirmedRows.length > 0 && waitlistedRows.length > 0) {
+    const maxConfirmedSeq = confirmedRows.reduce(
+      (max, r) => (BigInt(r.seq) > max ? BigInt(r.seq) : max),
+      BigInt(confirmedRows[0].seq),
+    );
+    const minWaitlistedSeq = waitlistedRows.reduce(
+      (min, r) => (BigInt(r.seq) < min ? BigInt(r.seq) : min),
+      BigInt(waitlistedRows[0].seq),
+    );
+
+    expect(
+      maxConfirmedSeq < minWaitlistedSeq,
+      `FIFO violated: max confirmed seq (${maxConfirmedSeq}) is not strictly less than min waitlisted seq (${minWaitlistedSeq})`,
+    ).toBe(true);
+  }
+}
