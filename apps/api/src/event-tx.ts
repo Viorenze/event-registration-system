@@ -1,5 +1,5 @@
 import { and, count, type Db, eq, events, registrations, sql } from "@event-system/db";
-import { DomainError } from "./registrations.ts";
+import { DomainError } from "./domain-error.ts";
 
 export type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 

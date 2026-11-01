@@ -130,7 +130,7 @@ describe("C6: Time Rules, Status Transitions & Lock Interleaving Tests", () => {
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: userExisting, role: "member" },
+      { userId: userExisting },
     );
     expect(cancelRes).toEqual({ kind: "cancelled" });
 
@@ -177,13 +177,7 @@ describe("C6: Time Rules, Status Transitions & Lock Interleaving Tests", () => {
 
     // 3. Cancel registration -> EVENT_STARTED, DB unchanged
     await expect(
-      cancel(
-        createDbClient(adminClient),
-        fixtureOrgId,
-        eventId,
-        { me: true },
-        { userId: user1, role: "member" },
-      ),
+      cancel(createDbClient(adminClient), fixtureOrgId, eventId, { me: true }, { userId: user1 }),
     ).rejects.toMatchObject({ code: "EVENT_STARTED" });
     expect(await getDbSnapshot(eventId)).toEqual(snap1);
 
@@ -238,13 +232,7 @@ describe("C6: Time Rules, Status Transitions & Lock Interleaving Tests", () => {
 
     // 3. Cancel registration -> EVENT_CANCELLED
     await expect(
-      cancel(
-        createDbClient(adminClient),
-        fixtureOrgId,
-        eventId,
-        { me: true },
-        { userId: user1, role: "member" },
-      ),
+      cancel(createDbClient(adminClient), fixtureOrgId, eventId, { me: true }, { userId: user1 }),
     ).rejects.toMatchObject({ code: "EVENT_CANCELLED" });
     expect(await getDbSnapshot(eventId)).toEqual(snap1);
 
@@ -266,7 +254,7 @@ describe("C6: Time Rules, Status Transitions & Lock Interleaving Tests", () => {
         fixtureOrgId,
         bothEventId,
         { me: true },
-        { userId: user1, role: "member" },
+        { userId: user1 },
       ),
     ).rejects.toMatchObject({ code: "EVENT_CANCELLED" });
 

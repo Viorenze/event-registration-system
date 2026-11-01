@@ -124,7 +124,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: targetToCancel.user_id, role: "member" },
+      { userId: targetToCancel.user_id },
     );
     expect(cancelRes).toEqual({ kind: "cancelled" });
 
@@ -177,7 +177,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: user1, role: "member" },
+      { userId: user1 },
     );
     expect(noopRes).toEqual({ kind: "noop" });
     const postNoopSnapshot = await adminClient.query(
@@ -193,7 +193,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: user1, role: "member" },
+      { userId: user1 },
     );
     expect(firstCancel).toEqual({ kind: "cancelled" });
 
@@ -209,7 +209,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: user1, role: "member" },
+      { userId: user1 },
     );
     expect(duplicateCancel).toEqual({ kind: "noop" });
 
@@ -233,7 +233,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
         fixtureOrgId,
         otherEventId,
         { registrationId: snapAfterFirst.rows[0].id },
-        { userId: fixtureAdminId, role: "admin" },
+        { userId: fixtureAdminId },
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
 
@@ -250,7 +250,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
         fixtureOrgId,
         startedEventId,
         { me: true },
-        { userId: user2, role: "member" },
+        { userId: user2 },
       ),
     ).rejects.toMatchObject({ code: "EVENT_STARTED" });
 
@@ -267,7 +267,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
         fixtureOrgId,
         cancelledEventId,
         { me: true },
-        { userId: user2, role: "member" },
+        { userId: user2 },
       ),
     ).rejects.toMatchObject({ code: "EVENT_CANCELLED" });
   });
@@ -316,7 +316,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: u1, role: "member" },
+      { userId: u1 },
     );
     expect(firstCancelRes).toEqual({ kind: "cancelled" });
 
@@ -361,7 +361,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { registrationId: u1Reg.id },
-      { userId: fixtureAdminId, role: "admin" },
+      { userId: fixtureAdminId },
     );
     expect(duplicateCancelRes).toEqual({ kind: "noop" });
 
@@ -475,13 +475,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       const cancelTasks = cancelTargets.map((target, idx) => {
         return (async () => {
           await barrier;
-          return cancel(
-            dbs[idx],
-            fixtureOrgId,
-            eventId,
-            { me: true },
-            { userId: target.user_id, role: "member" },
-          );
+          return cancel(dbs[idx], fixtureOrgId, eventId, { me: true }, { userId: target.user_id });
         })();
       });
 
