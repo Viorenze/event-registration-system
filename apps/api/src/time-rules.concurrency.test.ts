@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { createDbClient, pg } from "@event-system/db";
 import { setupTestDatabase, type TestDatabaseContext } from "./test-helper.ts";
 import { cancel, cancelEvent, register, updateEvent } from "./registrations.ts";
-import { waitForLockWait } from "./test-helpers/concurrency-harness.ts";
+import { assertDistinctPids, waitForLockWait } from "./test-helpers/concurrency-harness.ts";
 
 describe("C6: Time Rules, Status Transitions & Lock Interleaving Tests", () => {
   let ctx: TestDatabaseContext;
@@ -396,6 +396,599 @@ describe("C6: Time Rules, Status Transitions & Lock Interleaving Tests", () => {
         [eventId, userB],
       );
       expect(bRegCount.rows[0].c).toBe(0);
+    } finally {
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientA.end().catch(() => {});
+      await clientB.end().catch(() => {});
+      await clientObserver.end().catch(() => {});
+    }
+  });
+
+  // =========================================================================
+  // F-T1: Lock Mutex Extension (cancel, updateEvent with capacity, cancelEvent)
+  // =========================================================================
+
+  it("F-T1 cancel: Connection A holds FOR NO KEY UPDATE, B calls cancel, observing Lock wait and release -> cancelled", async () => {
+    const eventId = crypto.randomUUID();
+    await adminClient.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '5 days', NOW() + interval '2 days', 5, 'open', $5, NOW(), NOW())`,
+      [eventId, fixtureOrgId, "F-T1 Cancel Event", "Desc", fixtureOwnerId],
+    );
+
+    const userB = await createUser("FT1 Cancel User");
+    const regId = crypto.randomUUID();
+    await adminClient.query(
+      `INSERT INTO registrations (id, organization_id, event_id, user_id, status, created_at)
+       VALUES ($1, $2, $3, $4, 'confirmed', NOW())`,
+      [regId, fixtureOrgId, eventId, userB],
+    );
+
+    const clientA = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-cancel-A",
+    });
+    const clientB = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-cancel-B",
+    });
+    const clientObserver = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-cancel-obs",
+    });
+
+    await clientA.connect();
+    await clientB.connect();
+    await clientObserver.connect();
+
+    const dbB = createDbClient(clientB);
+
+    try {
+      const aPidRes = await clientA.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const bPidRes = await clientB.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const aPid = aPidRes.rows[0].pid;
+      const bPid = bPidRes.rows[0].pid;
+      assertDistinctPids([aPid, bPid]);
+
+      // 1. A starts transaction and locks event row with FOR NO KEY UPDATE
+      await clientA.query("BEGIN");
+      await clientA.query(
+        "SELECT id FROM events WHERE id = $1 AND organization_id = $2 FOR NO KEY UPDATE",
+        [eventId, fixtureOrgId],
+      );
+
+      // Set lock_timeout on B only to prevent hanging
+      await clientB.query("SET lock_timeout = '10s'");
+
+      // 2. B calls cancel on independent connection
+      let bFinished = false;
+      let bResult: unknown = null;
+      let bError: unknown = null;
+
+      const bPromise = cancel(dbB, fixtureOrgId, eventId, { me: true }, { userId: userB })
+        .then((res) => {
+          bFinished = true;
+          bResult = res;
+        })
+        .catch((err) => {
+          bFinished = true;
+          bError = err;
+        });
+
+      // 3. Observer polls until B enters Lock wait blocked by A
+      await waitForLockWait(clientObserver, "ft1-cancel-B", aPid, 10000);
+
+      // 4. Assert B is not finished and DB has no changes
+      expect(bFinished).toBe(false);
+      const preCommitReg = await clientObserver.query<{
+        status: string;
+        cancelled_at: Date | null;
+      }>("SELECT status, cancelled_at FROM registrations WHERE id = $1", [regId]);
+      expect(preCommitReg.rows[0].status).toBe("confirmed");
+      expect(preCommitReg.rows[0].cancelled_at).toBeNull();
+
+      // 5. A commits
+      await clientA.query("COMMIT");
+
+      // 6. B finishes and DB state is cancelled
+      await bPromise;
+      if (bError) throw bError;
+      expect(bFinished).toBe(true);
+      expect(bResult).toEqual({ kind: "cancelled" });
+
+      const postCommitReg = await clientObserver.query<{
+        status: string;
+        cancelled_at: Date | null;
+      }>("SELECT status, cancelled_at FROM registrations WHERE id = $1", [regId]);
+      expect(postCommitReg.rows[0].status).toBe("cancelled");
+      expect(postCommitReg.rows[0].cancelled_at).not.toBeNull();
+    } finally {
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientA.end().catch(() => {});
+      await clientB.end().catch(() => {});
+      await clientObserver.end().catch(() => {});
+    }
+  });
+
+  it("F-T1 updateEvent: Connection A holds FOR NO KEY UPDATE, B calls updateEvent with capacity, observing Lock wait and release -> capacity updated", async () => {
+    const eventId = crypto.randomUUID();
+    await adminClient.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '5 days', NOW() + interval '2 days', 5, 'open', $5, NOW(), NOW())`,
+      [eventId, fixtureOrgId, "F-T1 Update Event", "Desc", fixtureOwnerId],
+    );
+
+    const clientA = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-update-A",
+    });
+    const clientB = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-update-B",
+    });
+    const clientObserver = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-update-obs",
+    });
+
+    await clientA.connect();
+    await clientB.connect();
+    await clientObserver.connect();
+
+    const dbB = createDbClient(clientB);
+
+    try {
+      const aPidRes = await clientA.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const bPidRes = await clientB.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const aPid = aPidRes.rows[0].pid;
+      const bPid = bPidRes.rows[0].pid;
+      assertDistinctPids([aPid, bPid]);
+
+      // 1. A starts transaction and locks event row with FOR NO KEY UPDATE
+      await clientA.query("BEGIN");
+      await clientA.query(
+        "SELECT id FROM events WHERE id = $1 AND organization_id = $2 FOR NO KEY UPDATE",
+        [eventId, fixtureOrgId],
+      );
+
+      // Set lock_timeout on B only to prevent hanging
+      await clientB.query("SET lock_timeout = '10s'");
+
+      // 2. B calls updateEvent with capacity on independent connection
+      let bFinished = false;
+      let bResult: unknown = null;
+      let bError: unknown = null;
+
+      const bPromise = updateEvent(dbB, fixtureOrgId, eventId, { capacity: 20 })
+        .then((res) => {
+          bFinished = true;
+          bResult = res;
+        })
+        .catch((err) => {
+          bFinished = true;
+          bError = err;
+        });
+
+      // 3. Observer polls until B enters Lock wait blocked by A
+      await waitForLockWait(clientObserver, "ft1-update-B", aPid, 10000);
+
+      // 4. Assert B is not finished and DB has no changes
+      expect(bFinished).toBe(false);
+      const preCommitEvent = await clientObserver.query<{ capacity: number }>(
+        "SELECT capacity FROM events WHERE id = $1",
+        [eventId],
+      );
+      expect(preCommitEvent.rows[0].capacity).toBe(5);
+
+      // 5. A commits
+      await clientA.query("COMMIT");
+
+      // 6. B finishes and DB capacity is updated
+      await bPromise;
+      if (bError) throw bError;
+      expect(bFinished).toBe(true);
+      expect(bResult).toMatchObject({ capacity: 20 });
+
+      const postCommitEvent = await clientObserver.query<{ capacity: number }>(
+        "SELECT capacity FROM events WHERE id = $1",
+        [eventId],
+      );
+      expect(postCommitEvent.rows[0].capacity).toBe(20);
+    } finally {
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientA.end().catch(() => {});
+      await clientB.end().catch(() => {});
+      await clientObserver.end().catch(() => {});
+    }
+  });
+
+  it("F-T1 cancelEvent: Connection A holds FOR NO KEY UPDATE, B calls cancelEvent, observing Lock wait and release -> status cancelled", async () => {
+    const eventId = crypto.randomUUID();
+    await adminClient.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '5 days', NOW() + interval '2 days', 5, 'open', $5, NOW(), NOW())`,
+      [eventId, fixtureOrgId, "F-T1 CancelEvent Event", "Desc", fixtureOwnerId],
+    );
+
+    const clientA = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-cancelevent-A",
+    });
+    const clientB = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-cancelevent-B",
+    });
+    const clientObserver = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft1-cancelevent-obs",
+    });
+
+    await clientA.connect();
+    await clientB.connect();
+    await clientObserver.connect();
+
+    const dbB = createDbClient(clientB);
+
+    try {
+      const aPidRes = await clientA.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const bPidRes = await clientB.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const aPid = aPidRes.rows[0].pid;
+      const bPid = bPidRes.rows[0].pid;
+      assertDistinctPids([aPid, bPid]);
+
+      // 1. A starts transaction and locks event row with FOR NO KEY UPDATE
+      await clientA.query("BEGIN");
+      await clientA.query(
+        "SELECT id FROM events WHERE id = $1 AND organization_id = $2 FOR NO KEY UPDATE",
+        [eventId, fixtureOrgId],
+      );
+
+      // Set lock_timeout on B only to prevent hanging
+      await clientB.query("SET lock_timeout = '10s'");
+
+      // 2. B calls cancelEvent on independent connection
+      let bFinished = false;
+      let bResult: unknown = null;
+      let bError: unknown = null;
+
+      const bPromise = cancelEvent(dbB, fixtureOrgId, eventId)
+        .then((res) => {
+          bFinished = true;
+          bResult = res;
+        })
+        .catch((err) => {
+          bFinished = true;
+          bError = err;
+        });
+
+      // 3. Observer polls until B enters Lock wait blocked by A
+      await waitForLockWait(clientObserver, "ft1-cancelevent-B", aPid, 10000);
+
+      // 4. Assert B is not finished and DB has no changes
+      expect(bFinished).toBe(false);
+      const preCommitEvent = await clientObserver.query<{ status: string }>(
+        "SELECT status FROM events WHERE id = $1",
+        [eventId],
+      );
+      expect(preCommitEvent.rows[0].status).toBe("open");
+
+      // 5. A commits
+      await clientA.query("COMMIT");
+
+      // 6. B finishes and DB status is cancelled
+      await bPromise;
+      if (bError) throw bError;
+      expect(bFinished).toBe(true);
+      expect(bResult).toMatchObject({ status: "cancelled" });
+
+      const postCommitEvent = await clientObserver.query<{ status: string }>(
+        "SELECT status FROM events WHERE id = $1",
+        [eventId],
+      );
+      expect(postCommitEvent.rows[0].status).toBe("cancelled");
+    } finally {
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientA.end().catch(() => {});
+      await clientB.end().catch(() => {});
+      await clientObserver.end().catch(() => {});
+    }
+  });
+
+  // =========================================================================
+  // F-T2: Clock Interleaving Extension (cancel, updateEvent with capacity, cancelEvent)
+  // =========================================================================
+
+  it("F-T2 cancel: Connection A holds lock, B calls cancel and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged", async () => {
+    const eventId = crypto.randomUUID();
+    // Fixture: starts_at in future (1 hour), registration_deadline in past (10 minutes)
+    await adminClient.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '1 hour', NOW() - interval '10 minutes', 5, 'open', $5, NOW(), NOW())`,
+      [eventId, fixtureOrgId, "F-T2 Cancel Event", "Desc", fixtureOwnerId],
+    );
+
+    const userB = await createUser("FT2 Cancel User");
+    const regId = crypto.randomUUID();
+    await adminClient.query(
+      `INSERT INTO registrations (id, organization_id, event_id, user_id, status, created_at)
+       VALUES ($1, $2, $3, $4, 'confirmed', NOW())`,
+      [regId, fixtureOrgId, eventId, userB],
+    );
+
+    const snapBefore = await getDbSnapshot(eventId);
+    const allRegsBefore = await adminClient.query(`SELECT * FROM registrations ORDER BY id`);
+
+    const clientA = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-cancel-A",
+    });
+    const clientB = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-cancel-B",
+    });
+    const clientObserver = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-cancel-obs",
+    });
+
+    await clientA.connect();
+    await clientB.connect();
+    await clientObserver.connect();
+
+    const dbB = createDbClient(clientB);
+
+    try {
+      const aPidRes = await clientA.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const bPidRes = await clientB.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const aPid = aPidRes.rows[0].pid;
+      const bPid = bPidRes.rows[0].pid;
+      assertDistinctPids([aPid, bPid]);
+
+      // 1. A starts transaction and locks event row with FOR NO KEY UPDATE
+      await clientA.query("BEGIN");
+      await clientA.query(
+        "SELECT id FROM events WHERE id = $1 AND organization_id = $2 FOR NO KEY UPDATE",
+        [eventId, fixtureOrgId],
+      );
+
+      await clientB.query("SET lock_timeout = '10s'");
+
+      // 2. B calls cancel and blocks
+      let bFinished = false;
+      let bError: unknown = null;
+      let bResult: unknown = null;
+
+      const bPromise = cancel(dbB, fixtureOrgId, eventId, { me: true }, { userId: userB })
+        .then((res) => {
+          bFinished = true;
+          bResult = res;
+        })
+        .catch((err) => {
+          bFinished = true;
+          bError = err;
+        });
+
+      // 3. Observer polls until B enters Lock wait
+      await waitForLockWait(clientObserver, "ft2-cancel-B", aPid, 10000);
+      expect(bFinished).toBe(false);
+
+      // 4. A updates starts_at using clock_timestamp() and commits
+      await clientA.query("UPDATE events SET starts_at = clock_timestamp() WHERE id = $1", [
+        eventId,
+      ]);
+      await clientA.query("COMMIT");
+
+      // 5. B acquires lock and must throw EVENT_STARTED
+      await bPromise;
+      expect(bFinished).toBe(true);
+      expect(bError).toBeDefined();
+      expect((bError as { code?: string })?.code).toBe("EVENT_STARTED");
+      expect(bResult).toBeNull();
+
+      // 6. Snapshot comparison: registrations whole table unchanged, events unchanged except starts_at
+      const allRegsAfter = await adminClient.query(`SELECT * FROM registrations ORDER BY id`);
+      expect(allRegsAfter.rows).toEqual(allRegsBefore.rows);
+
+      const snapAfter = await getDbSnapshot(eventId);
+      expect(snapAfter.regs).toEqual(snapBefore.regs);
+      const { starts_at: startsAtBefore, ...eventRestBefore } = snapBefore.event;
+      const { starts_at: startsAtAfter, ...eventRestAfter } = snapAfter.event;
+      expect(eventRestAfter).toEqual(eventRestBefore);
+      expect(new Date(startsAtAfter).getTime()).not.toBe(new Date(startsAtBefore).getTime());
+    } finally {
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientA.end().catch(() => {});
+      await clientB.end().catch(() => {});
+      await clientObserver.end().catch(() => {});
+    }
+  });
+
+  it("F-T2 updateEvent: Connection A holds lock, B calls updateEvent with capacity and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged", async () => {
+    const eventId = crypto.randomUUID();
+    // Fixture: starts_at in future (1 hour), registration_deadline in past (10 minutes)
+    await adminClient.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '1 hour', NOW() - interval '10 minutes', 5, 'open', $5, NOW(), NOW())`,
+      [eventId, fixtureOrgId, "F-T2 Update Event", "Desc", fixtureOwnerId],
+    );
+
+    const snapBefore = await getDbSnapshot(eventId);
+    const allRegsBefore = await adminClient.query(`SELECT * FROM registrations ORDER BY id`);
+
+    const clientA = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-update-A",
+    });
+    const clientB = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-update-B",
+    });
+    const clientObserver = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-update-obs",
+    });
+
+    await clientA.connect();
+    await clientB.connect();
+    await clientObserver.connect();
+
+    const dbB = createDbClient(clientB);
+
+    try {
+      const aPidRes = await clientA.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const bPidRes = await clientB.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const aPid = aPidRes.rows[0].pid;
+      const bPid = bPidRes.rows[0].pid;
+      assertDistinctPids([aPid, bPid]);
+
+      // 1. A starts transaction and locks event row with FOR NO KEY UPDATE
+      await clientA.query("BEGIN");
+      await clientA.query(
+        "SELECT id FROM events WHERE id = $1 AND organization_id = $2 FOR NO KEY UPDATE",
+        [eventId, fixtureOrgId],
+      );
+
+      await clientB.query("SET lock_timeout = '10s'");
+
+      // 2. B calls updateEvent with capacity and blocks
+      let bFinished = false;
+      let bError: unknown = null;
+      let bResult: unknown = null;
+
+      const bPromise = updateEvent(dbB, fixtureOrgId, eventId, { capacity: 20 })
+        .then((res) => {
+          bFinished = true;
+          bResult = res;
+        })
+        .catch((err) => {
+          bFinished = true;
+          bError = err;
+        });
+
+      // 3. Observer polls until B enters Lock wait
+      await waitForLockWait(clientObserver, "ft2-update-B", aPid, 10000);
+      expect(bFinished).toBe(false);
+
+      // 4. A updates starts_at using clock_timestamp() and commits
+      await clientA.query("UPDATE events SET starts_at = clock_timestamp() WHERE id = $1", [
+        eventId,
+      ]);
+      await clientA.query("COMMIT");
+
+      // 5. B acquires lock and must throw EVENT_STARTED
+      await bPromise;
+      expect(bFinished).toBe(true);
+      expect(bError).toBeDefined();
+      expect((bError as { code?: string })?.code).toBe("EVENT_STARTED");
+      expect(bResult).toBeNull();
+
+      // 6. Snapshot comparison: registrations whole table unchanged, events unchanged except starts_at
+      const allRegsAfter = await adminClient.query(`SELECT * FROM registrations ORDER BY id`);
+      expect(allRegsAfter.rows).toEqual(allRegsBefore.rows);
+
+      const snapAfter = await getDbSnapshot(eventId);
+      expect(snapAfter.regs).toEqual(snapBefore.regs);
+      const { starts_at: startsAtBefore, ...eventRestBefore } = snapBefore.event;
+      const { starts_at: startsAtAfter, ...eventRestAfter } = snapAfter.event;
+      expect(eventRestAfter).toEqual(eventRestBefore);
+      expect(new Date(startsAtAfter).getTime()).not.toBe(new Date(startsAtBefore).getTime());
+    } finally {
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientA.end().catch(() => {});
+      await clientB.end().catch(() => {});
+      await clientObserver.end().catch(() => {});
+    }
+  });
+
+  it("F-T2 cancelEvent: Connection A holds lock, B calls cancelEvent and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged", async () => {
+    const eventId = crypto.randomUUID();
+    // Fixture: starts_at in future (1 hour), registration_deadline in past (10 minutes)
+    await adminClient.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '1 hour', NOW() - interval '10 minutes', 5, 'open', $5, NOW(), NOW())`,
+      [eventId, fixtureOrgId, "F-T2 CancelEvent Event", "Desc", fixtureOwnerId],
+    );
+
+    const snapBefore = await getDbSnapshot(eventId);
+    const allRegsBefore = await adminClient.query(`SELECT * FROM registrations ORDER BY id`);
+
+    const clientA = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-cancelevent-A",
+    });
+    const clientB = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-cancelevent-B",
+    });
+    const clientObserver = new pg.Client({
+      connectionString: ctx.testDbUrl,
+      application_name: "ft2-cancelevent-obs",
+    });
+
+    await clientA.connect();
+    await clientB.connect();
+    await clientObserver.connect();
+
+    const dbB = createDbClient(clientB);
+
+    try {
+      const aPidRes = await clientA.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const bPidRes = await clientB.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const aPid = aPidRes.rows[0].pid;
+      const bPid = bPidRes.rows[0].pid;
+      assertDistinctPids([aPid, bPid]);
+
+      // 1. A starts transaction and locks event row with FOR NO KEY UPDATE
+      await clientA.query("BEGIN");
+      await clientA.query(
+        "SELECT id FROM events WHERE id = $1 AND organization_id = $2 FOR NO KEY UPDATE",
+        [eventId, fixtureOrgId],
+      );
+
+      await clientB.query("SET lock_timeout = '10s'");
+
+      // 2. B calls cancelEvent and blocks
+      let bFinished = false;
+      let bError: unknown = null;
+      let bResult: unknown = null;
+
+      const bPromise = cancelEvent(dbB, fixtureOrgId, eventId)
+        .then((res) => {
+          bFinished = true;
+          bResult = res;
+        })
+        .catch((err) => {
+          bFinished = true;
+          bError = err;
+        });
+
+      // 3. Observer polls until B enters Lock wait
+      await waitForLockWait(clientObserver, "ft2-cancelevent-B", aPid, 10000);
+      expect(bFinished).toBe(false);
+
+      // 4. A updates starts_at using clock_timestamp() and commits
+      await clientA.query("UPDATE events SET starts_at = clock_timestamp() WHERE id = $1", [
+        eventId,
+      ]);
+      await clientA.query("COMMIT");
+
+      // 5. B acquires lock and must throw EVENT_STARTED
+      await bPromise;
+      expect(bFinished).toBe(true);
+      expect(bError).toBeDefined();
+      expect((bError as { code?: string })?.code).toBe("EVENT_STARTED");
+      expect(bResult).toBeNull();
+
+      // 6. Snapshot comparison: registrations whole table unchanged, events unchanged except starts_at
+      const allRegsAfter = await adminClient.query(`SELECT * FROM registrations ORDER BY id`);
+      expect(allRegsAfter.rows).toEqual(allRegsBefore.rows);
+
+      const snapAfter = await getDbSnapshot(eventId);
+      expect(snapAfter.regs).toEqual(snapBefore.regs);
+      const { starts_at: startsAtBefore, ...eventRestBefore } = snapBefore.event;
+      const { starts_at: startsAtAfter, ...eventRestAfter } = snapAfter.event;
+      expect(eventRestAfter).toEqual(eventRestBefore);
+      expect(new Date(startsAtAfter).getTime()).not.toBe(new Date(startsAtBefore).getTime());
     } finally {
       await clientA.query("ROLLBACK").catch(() => {});
       await clientA.end().catch(() => {});
