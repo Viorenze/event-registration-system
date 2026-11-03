@@ -3,7 +3,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { createDbClient, type Db, pg } from "@event-system/db";
 import { setupTestDatabase, type TestDatabaseContext } from "./test-helper.ts";
 import { cancel, register, updateEvent } from "./registrations.ts";
-import { assertInvariants, createStartGate } from "./test-helpers/concurrency-harness.ts";
+import {
+  assertFifoOrder,
+  assertInvariants,
+  createStartGate,
+} from "./test-helpers/concurrency-harness.ts";
 
 describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests", () => {
   let ctx: TestDatabaseContext;
@@ -120,7 +124,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: targetToCancel.user_id, role: "member" },
+      { userId: targetToCancel.user_id },
     );
     expect(cancelRes).toEqual({ kind: "cancelled" });
 
@@ -173,7 +177,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: user1, role: "member" },
+      { userId: user1 },
     );
     expect(noopRes).toEqual({ kind: "noop" });
     const postNoopSnapshot = await adminClient.query(
@@ -189,7 +193,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: user1, role: "member" },
+      { userId: user1 },
     );
     expect(firstCancel).toEqual({ kind: "cancelled" });
 
@@ -205,7 +209,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       fixtureOrgId,
       eventId,
       { me: true },
-      { userId: user1, role: "member" },
+      { userId: user1 },
     );
     expect(duplicateCancel).toEqual({ kind: "noop" });
 
@@ -229,7 +233,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
         fixtureOrgId,
         otherEventId,
         { registrationId: snapAfterFirst.rows[0].id },
-        { userId: fixtureAdminId, role: "admin" },
+        { userId: fixtureAdminId },
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
 
@@ -246,7 +250,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
         fixtureOrgId,
         startedEventId,
         { me: true },
-        { userId: user2, role: "member" },
+        { userId: user2 },
       ),
     ).rejects.toMatchObject({ code: "EVENT_STARTED" });
 
@@ -263,9 +267,113 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
         fixtureOrgId,
         cancelledEventId,
         { me: true },
-        { userId: user2, role: "member" },
+        { userId: user2 },
       ),
     ).rejects.toMatchObject({ code: "EVENT_CANCELLED" });
+  });
+
+  // --- C8 (new): Capacity 1, 1 confirmed, 2 waitlisted; cancel via me:true promotes min seq waitlisted; duplicate cancel via registrationId returns noop and leaves all rows verbatim ---
+  it("C8 (new): capacity 1, 1 confirmed, 2 waitlisted; cancel via { me: true } promotes min seq waitlisted; duplicate cancel via { registrationId } returns noop and leaves all rows verbatim", async () => {
+    const eventId = crypto.randomUUID();
+    await adminClient.query(
+      `INSERT INTO events (id, organization_id, title, description, starts_at, registration_deadline, capacity, status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW() + interval '10 days', NOW() + interval '5 days', 1, 'open', $5, NOW(), NOW())`,
+      [eventId, fixtureOrgId, "C8 New Event", "Event for C8 new test", fixtureOwnerId],
+    );
+
+    const [u1, u2, u3] = await createUsers(3, "c8_new");
+    // Register 3 users sequentially: u1 confirmed, u2 waitlisted, u3 waitlisted
+    await register(createDbClient(adminClient), fixtureOrgId, eventId, u1);
+    await register(createDbClient(adminClient), fixtureOrgId, eventId, u2);
+    await register(createDbClient(adminClient), fixtureOrgId, eventId, u3);
+
+    const preRows = await adminClient.query<{
+      id: string;
+      user_id: string;
+      status: string;
+      seq: number;
+    }>(`SELECT id, user_id, status, seq FROM registrations WHERE event_id = $1 ORDER BY seq ASC`, [
+      eventId,
+    ]);
+
+    expect(preRows.rows.length).toBe(3);
+    const u1Reg = preRows.rows.find((r) => r.user_id === u1)!;
+    const u2Reg = preRows.rows.find((r) => r.user_id === u2)!;
+    const u3Reg = preRows.rows.find((r) => r.user_id === u3)!;
+
+    expect(u1Reg.status).toBe("confirmed");
+    expect(u2Reg.status).toBe("waitlisted");
+    expect(u3Reg.status).toBe("waitlisted");
+    expect(BigInt(u1Reg.seq) < BigInt(u2Reg.seq)).toBe(true);
+    expect(BigInt(u2Reg.seq) < BigInt(u3Reg.seq)).toBe(true);
+
+    await assertInvariants(adminClient, eventId);
+    await assertFifoOrder(adminClient, eventId);
+
+    // 1. First cancel: u1 cancels own registration using { me: true }
+    const firstCancelRes = await cancel(
+      createDbClient(adminClient),
+      fixtureOrgId,
+      eventId,
+      { me: true },
+      { userId: u1 },
+    );
+    expect(firstCancelRes).toEqual({ kind: "cancelled" });
+
+    // Assert u1 cancelled, u2 (min seq waitlisted) promoted to confirmed, u3 remains waitlisted
+    const rowsAfterFirst = await adminClient.query<{
+      id: string;
+      user_id: string;
+      status: string;
+      seq: number;
+      cancelled_at: Date | null;
+      promoted_at: Date | null;
+    }>(
+      `SELECT id, user_id, status, seq, cancelled_at, promoted_at FROM registrations WHERE event_id = $1 ORDER BY seq ASC`,
+      [eventId],
+    );
+    const u1After = rowsAfterFirst.rows.find((r) => r.id === u1Reg.id)!;
+    const u2After = rowsAfterFirst.rows.find((r) => r.id === u2Reg.id)!;
+    const u3After = rowsAfterFirst.rows.find((r) => r.id === u3Reg.id)!;
+
+    expect(u1After.status).toBe("cancelled");
+    expect(u1After.cancelled_at).not.toBeNull();
+    expect(u2After.status).toBe("confirmed");
+    expect(u2After.promoted_at).not.toBeNull();
+    expect(u3After.status).toBe("waitlisted");
+    expect(u3After.promoted_at).toBeNull();
+
+    // promoted_at and cancelled_at must be exact same timestamp
+    expect(u2After.promoted_at?.getTime()).toBe(u1After.cancelled_at?.getTime());
+
+    await assertInvariants(adminClient, eventId);
+    await assertFifoOrder(adminClient, eventId);
+
+    // Full column snapshot of ALL registrations for this event
+    const snapAfterFirst = await adminClient.query(
+      `SELECT id, organization_id, event_id, user_id, status, seq, cancelled_at, promoted_at, created_at FROM registrations WHERE event_id = $1 ORDER BY id`,
+      [eventId],
+    );
+
+    // 2. Second cancel: repeat cancel using { registrationId: u1Reg.id }
+    const duplicateCancelRes = await cancel(
+      createDbClient(adminClient),
+      fixtureOrgId,
+      eventId,
+      { registrationId: u1Reg.id },
+      { userId: fixtureAdminId },
+    );
+    expect(duplicateCancelRes).toEqual({ kind: "noop" });
+
+    // All registrations all columns verbatim comparison
+    const snapAfterSecond = await adminClient.query(
+      `SELECT id, organization_id, event_id, user_id, status, seq, cancelled_at, promoted_at, created_at FROM registrations WHERE event_id = $1 ORDER BY id`,
+      [eventId],
+    );
+    expect(snapAfterSecond.rows).toEqual(snapAfterFirst.rows);
+
+    await assertInvariants(adminClient, eventId);
+    await assertFifoOrder(adminClient, eventId);
   });
 
   // --- C5: Capacity adjustments and waitlist promotions ---
@@ -308,6 +416,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
     expect(confirmed12.length).toBe(12);
     expect(waitlisted12.length).toBe(3);
     await assertInvariants(adminClient, eventId);
+    await assertFifoOrder(adminClient, eventId);
 
     // 4. 12 -> 15: remaining 3 waitlisted promoted
     await updateEvent(createDbClient(adminClient), fixtureOrgId, eventId, { capacity: 15 });
@@ -318,6 +427,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
     expect(snap15.rows.filter((r) => r.status === "confirmed").length).toBe(15);
     expect(snap15.rows.filter((r) => r.status === "waitlisted").length).toBe(0);
     await assertInvariants(adminClient, eventId);
+    await assertFifoOrder(adminClient, eventId);
   });
 
   // --- C4: Capacity 10, 10 confirmed + 5 waitlisted; concurrent 3 cancels + 20 new registrations ---
@@ -365,13 +475,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       const cancelTasks = cancelTargets.map((target, idx) => {
         return (async () => {
           await barrier;
-          return cancel(
-            dbs[idx],
-            fixtureOrgId,
-            eventId,
-            { me: true },
-            { userId: target.user_id, role: "member" },
-          );
+          return cancel(dbs[idx], fixtureOrgId, eventId, { me: true }, { userId: target.user_id });
         })();
       });
 
@@ -401,6 +505,7 @@ describe("C3, C8, C5, C4: Cancellation, Promotion & Capacity Concurrency Tests",
       expect(inv.confirmedCount).toBe(10);
       expect(inv.cancelledCount).toBe(3);
       expect(inv.waitlistedCount).toBe(22);
+      await assertFifoOrder(adminClient, eventId);
     } finally {
       await Promise.all(clients.map((c) => c.end().catch(() => {})));
     }

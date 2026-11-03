@@ -1,4 +1,5 @@
 import { and, count, type Db, eq, events, inArray, registrations } from "@event-system/db";
+import { DomainError } from "./domain-error.ts";
 import {
   assertNotCancelled,
   assertNotStarted,
@@ -6,15 +7,7 @@ import {
   promoteWaitlisted,
 } from "./event-tx.ts";
 
-export class DomainError extends Error {
-  readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "DomainError";
-    this.code = code;
-  }
-}
+export { DomainError } from "./domain-error.ts";
 
 export interface RegistrationDto {
   id: string;
@@ -128,7 +121,7 @@ export async function cancel(
   orgId: string,
   eventId: string,
   target: { me: true } | { registrationId: string },
-  actor: { userId: string; role: string },
+  actor: { userId: string },
 ): Promise<CancelResult> {
   return await db.transaction(async (tx) => {
     // 流程：锁 → 读时钟 → EVENT_CANCELLED → EVENT_STARTED

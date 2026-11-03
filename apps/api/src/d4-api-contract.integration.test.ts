@@ -10,11 +10,13 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
   let adminCookie: string;
   let memberCookie: string;
   let member2Cookie: string;
+  let member3Cookie: string;
   let orgId: string;
   let ownerId: string;
   let adminId: string;
   let memberId: string;
   let member2Id: string;
+  let member3Id: string;
 
   beforeAll(async () => {
     ctx = await setupTestDatabase();
@@ -80,21 +82,25 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
     const admin = await createUser("d4-admin@example.com", "D4 Admin");
     const member = await createUser("d4-member@example.com", "D4 Member");
     const member2 = await createUser("d4-member2@example.com", "D4 Member 2");
+    const member3 = await createUser("d4-member3@example.com", "D4 Member 3");
 
     ownerCookie = owner.cookie;
     adminCookie = admin.cookie;
     memberCookie = member.cookie;
     member2Cookie = member2.cookie;
+    member3Cookie = member3.cookie;
 
     ownerId = owner.userId;
     adminId = admin.userId;
     memberId = member.userId;
     member2Id = member2.userId;
+    member3Id = member3.userId;
 
     orgId = await createOrg(ownerCookie, "D4 Org", `d4-org-${Date.now()}`);
     await addMember(orgId, adminId, "admin");
     await addMember(orgId, memberId, "member");
     await addMember(orgId, member2Id, "member");
+    await addMember(orgId, member3Id, "member");
   });
 
   afterAll(async () => {
@@ -102,6 +108,17 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       await ctx.cleanup();
     }
   });
+
+  async function getDbSnapshot() {
+    const [events, regs] = await Promise.all([
+      ctx.pool.query('SELECT * FROM "events" ORDER BY id'),
+      ctx.pool.query('SELECT * FROM "registrations" ORDER BY id'),
+    ]);
+    return {
+      events: events.rows,
+      registrations: regs.rows,
+    };
+  }
 
   async function createEventFixture(
     params: {
@@ -162,6 +179,7 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
         startsAtOffset: "-1 hour",
         deadlineOffset: "-2 hours",
       });
+      const snapBefore = await getDbSnapshot();
 
       const res = await app.request(
         `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations/me`,
@@ -173,6 +191,28 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(res.status).toBe(409);
       const json = (await res.json()) as { error: { code: string; message: string } };
       expect(json.error.code).toBe("EVENT_STARTED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
+    });
+
+    it("returns 409 EVENT_CANCELLED when deleting own registration on cancelled event", async () => {
+      const eventId = await createEventFixture({ status: "cancelled" });
+      const snapBefore = await getDbSnapshot();
+
+      const res = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations/me`,
+        {
+          method: "DELETE",
+          headers: { cookie: memberCookie },
+        },
+      );
+      expect(res.status).toBe(409);
+      const json = (await res.json()) as { error: { code: string; message: string } };
+      expect(json.error.code).toBe("EVENT_CANCELLED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
     });
   });
 
@@ -244,6 +284,118 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(snap2.rows).toEqual(snap1.rows);
     });
 
+    it("A1 (new): capacity 1, 1 confirmed, 2 waitlisted; admin DELETE registrationId promotes min seq waitlisted; duplicate DELETE returns 204 with all rows verbatim", async () => {
+      const eventId = await createEventFixture({ capacity: 1 });
+      // member registers -> confirmed
+      const reg1Res = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations`,
+        { method: "POST", headers: { cookie: memberCookie } },
+      );
+      expect(reg1Res.status).toBe(201);
+      const reg1 = (await reg1Res.json()) as { id: string };
+
+      // member2 registers -> waitlisted
+      const reg2Res = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations`,
+        { method: "POST", headers: { cookie: member2Cookie } },
+      );
+      expect(reg2Res.status).toBe(201);
+      const reg2 = (await reg2Res.json()) as { id: string };
+
+      // member3 registers -> waitlisted
+      const reg3Res = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations`,
+        { method: "POST", headers: { cookie: member3Cookie } },
+      );
+      expect(reg3Res.status).toBe(201);
+      const reg3 = (await reg3Res.json()) as { id: string };
+
+      // First cancel via admin
+      const deleteRes = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations/${reg1.id}`,
+        { method: "DELETE", headers: { cookie: adminCookie } },
+      );
+      expect(deleteRes.status).toBe(204);
+
+      // Verify member2 is now confirmed, member3 remains waitlisted, member1 cancelled
+      const regsAfterFirst = await ctx.pool.query<{
+        id: string;
+        status: string;
+        cancelled_at: Date | null;
+        promoted_at: Date | null;
+      }>(
+        `SELECT id, status, cancelled_at, promoted_at FROM registrations WHERE event_id = $1 ORDER BY seq ASC`,
+        [eventId],
+      );
+      const r1 = regsAfterFirst.rows.find((r) => r.id === reg1.id)!;
+      const r2 = regsAfterFirst.rows.find((r) => r.id === reg2.id)!;
+      const r3 = regsAfterFirst.rows.find((r) => r.id === reg3.id)!;
+
+      expect(r1.status).toBe("cancelled");
+      expect(r1.cancelled_at).not.toBeNull();
+      expect(r2.status).toBe("confirmed");
+      expect(r2.promoted_at).not.toBeNull();
+      expect(r3.status).toBe("waitlisted");
+      expect(r3.promoted_at).toBeNull();
+      expect(r2.promoted_at?.getTime()).toBe(r1.cancelled_at?.getTime());
+
+      // Full table snapshot for this event
+      const snapFirst = await ctx.pool.query(
+        `SELECT id, organization_id, event_id, user_id, status, seq, cancelled_at, promoted_at, created_at FROM registrations WHERE event_id = $1 ORDER BY id`,
+        [eventId],
+      );
+
+      // Duplicate cancel via admin
+      const dupRes = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations/${reg1.id}`,
+        { method: "DELETE", headers: { cookie: adminCookie } },
+      );
+      expect(dupRes.status).toBe(204);
+
+      const snapSecond = await ctx.pool.query(
+        `SELECT id, organization_id, event_id, user_id, status, seq, cancelled_at, promoted_at, created_at FROM registrations WHERE event_id = $1 ORDER BY id`,
+        [eventId],
+      );
+      expect(snapSecond.rows).toEqual(snapFirst.rows);
+    });
+
+    it("returns 409 EVENT_CANCELLED when admin deletes registration on cancelled event", async () => {
+      const eventId = await createEventFixture({ status: "cancelled" });
+      const dummyRegId = crypto.randomUUID();
+      const snapBefore = await getDbSnapshot();
+
+      const res = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations/${dummyRegId}`,
+        { method: "DELETE", headers: { cookie: adminCookie } },
+      );
+      expect(res.status).toBe(409);
+      const json = (await res.json()) as { error: { code: string; message: string } };
+      expect(json.error.code).toBe("EVENT_CANCELLED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
+    });
+
+    it("returns 409 EVENT_STARTED when admin deletes registration on started event", async () => {
+      const eventId = await createEventFixture({
+        startsAtOffset: "-1 hour",
+        deadlineOffset: "-2 hours",
+      });
+      const dummyRegId = crypto.randomUUID();
+      const snapBefore = await getDbSnapshot();
+
+      const res = await app.request(
+        `http://localhost/api/orgs/${orgId}/events/${eventId}/registrations/${dummyRegId}`,
+        { method: "DELETE", headers: { cookie: adminCookie } },
+      );
+      expect(res.status).toBe(409);
+      const json = (await res.json()) as { error: { code: string; message: string } };
+      expect(json.error.code).toBe("EVENT_STARTED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
+    });
+
     it("returns 404 NOT_FOUND for wrong eventId and registrationId combination, DB unchanged", async () => {
       const eventId1 = await createEventFixture();
       const eventId2 = await createEventFixture();
@@ -255,9 +407,7 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(regRes.status).toBe(201);
       const reg1 = (await regRes.json()) as { id: string };
 
-      const regSnapBefore = await ctx.pool.query(`SELECT * FROM registrations WHERE id = $1`, [
-        reg1.id,
-      ]);
+      const regSnapBefore = await getDbSnapshot();
 
       // Call eventId2 with reg1.id
       const res = await app.request(
@@ -268,10 +418,8 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       const json = (await res.json()) as { error: { code: string; message: string } };
       expect(json.error.code).toBe("NOT_FOUND");
 
-      const regSnapAfter = await ctx.pool.query(`SELECT * FROM registrations WHERE id = $1`, [
-        reg1.id,
-      ]);
-      expect(regSnapAfter.rows).toEqual(regSnapBefore.rows);
+      const regSnapAfter = await getDbSnapshot();
+      expect(regSnapAfter).toEqual(regSnapBefore);
     });
   });
 
@@ -313,6 +461,7 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
         startsAtOffset: "-1 hour",
         deadlineOffset: "-2 hours",
       });
+      const snapBefore = await getDbSnapshot();
 
       const res = await app.request(`http://localhost/api/orgs/${orgId}/events/${eventId}`, {
         method: "PATCH",
@@ -325,6 +474,9 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(res.status).toBe(409);
       const json = (await res.json()) as { error: { code: string; message: string } };
       expect(json.error.code).toBe("EVENT_STARTED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
     });
 
     it("returns 200 when event is started and body only updates title", async () => {
@@ -348,6 +500,7 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
 
     it("returns 409 EVENT_CANCELLED when updating a cancelled event", async () => {
       const eventId = await createEventFixture({ status: "cancelled" });
+      const snapBefore = await getDbSnapshot();
 
       const res = await app.request(`http://localhost/api/orgs/${orgId}/events/${eventId}`, {
         method: "PATCH",
@@ -360,6 +513,9 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(res.status).toBe(409);
       const json = (await res.json()) as { error: { code: string; message: string } };
       expect(json.error.code).toBe("EVENT_CANCELLED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
     });
 
     it("returns 409 CAPACITY_BELOW_CONFIRMED when setting capacity below confirmed count", async () => {
@@ -382,6 +538,8 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       );
       expect(reg2Res.status).toBe(201);
 
+      const snapBefore = await getDbSnapshot();
+
       const res = await app.request(`http://localhost/api/orgs/${orgId}/events/${eventId}`, {
         method: "PATCH",
         headers: {
@@ -393,10 +551,14 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(res.status).toBe(409);
       const json = (await res.json()) as { error: { code: string; message: string } };
       expect(json.error.code).toBe("CAPACITY_BELOW_CONFIRMED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
     });
 
     it("rejects empty body, unknown fields, or capacity out of range with 400 VALIDATION", async () => {
       const eventId = await createEventFixture();
+      const snapBefore = await getDbSnapshot();
 
       // Empty body
       const resEmpty = await app.request(`http://localhost/api/orgs/${orgId}/events/${eventId}`, {
@@ -427,6 +589,9 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(resZero.status).toBe(400);
       const jsonZero = (await resZero.json()) as { error: { code: string; message: string } };
       expect(jsonZero.error.code).toBe("VALIDATION");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
     });
   });
 
@@ -466,6 +631,7 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
 
     it("returns 409 EVENT_CANCELLED on duplicate cancel of event", async () => {
       const eventId = await createEventFixture({ status: "cancelled" });
+      const snapBefore = await getDbSnapshot();
 
       const res = await app.request(`http://localhost/api/orgs/${orgId}/events/${eventId}/cancel`, {
         method: "POST",
@@ -474,6 +640,9 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       expect(res.status).toBe(409);
       const json = (await res.json()) as { error: { code: string; message: string } };
       expect(json.error.code).toBe("EVENT_CANCELLED");
+
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
     });
 
     it("returns 409 EVENT_STARTED when cancelling a started event, DB unchanged", async () => {
@@ -482,7 +651,7 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
         deadlineOffset: "-2 hours",
       });
 
-      const snapBefore = await ctx.pool.query(`SELECT * FROM events WHERE id = $1`, [eventId]);
+      const snapBefore = await getDbSnapshot();
 
       const res = await app.request(`http://localhost/api/orgs/${orgId}/events/${eventId}/cancel`, {
         method: "POST",
@@ -492,8 +661,8 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       const json = (await res.json()) as { error: { code: string; message: string } };
       expect(json.error.code).toBe("EVENT_STARTED");
 
-      const snapAfter = await ctx.pool.query(`SELECT * FROM events WHERE id = $1`, [eventId]);
-      expect(snapAfter.rows).toEqual(snapBefore.rows);
+      const snapAfter = await getDbSnapshot();
+      expect(snapAfter).toEqual(snapBefore);
     });
   });
 
@@ -542,6 +711,7 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
       "returns 400 VALIDATION (not 500 PG 22P02) for $name",
       async ({ method, getPath, headers, body }) => {
         const validEventId = await createEventFixture();
+        const snapBefore = await getDbSnapshot();
         const path = getPath(validEventId);
         const res = await app.request(path, {
           method,
@@ -554,6 +724,9 @@ describe("A1: D4 API Contract Tests (DELETE registrations, PATCH events, POST ca
         expect(res.status).toBe(400);
         const json = (await res.json()) as { error: { code: string; message: string } };
         expect(json.error.code).toBe("VALIDATION");
+
+        const snapAfter = await getDbSnapshot();
+        expect(snapAfter).toEqual(snapBefore);
       },
     );
   });

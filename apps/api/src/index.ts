@@ -793,10 +793,9 @@ export const app = baseApp
   .openapi(deleteRegistrationMeRoute, async (c) => {
     const { orgId, eventId } = c.req.valid("param");
     const sessionUser = c.get("user") as { id: string };
-    const memberRole = (c.get("memberRole") as string) ?? "member";
 
     try {
-      await cancel(db, orgId, eventId, { me: true }, { userId: sessionUser.id, role: memberRole });
+      await cancel(db, orgId, eventId, { me: true }, { userId: sessionUser.id });
       return c.body(null, 204);
     } catch (err) {
       return respondWithError(c, err, "Failed to cancel registration");
@@ -805,16 +804,9 @@ export const app = baseApp
   .openapi(deleteRegistrationRoute, async (c) => {
     const { orgId, eventId, registrationId } = c.req.valid("param");
     const sessionUser = c.get("user") as { id: string };
-    const memberRole = (c.get("memberRole") as string) ?? "admin";
 
     try {
-      await cancel(
-        db,
-        orgId,
-        eventId,
-        { registrationId },
-        { userId: sessionUser.id, role: memberRole },
-      );
+      await cancel(db, orgId, eventId, { registrationId }, { userId: sessionUser.id });
       return c.body(null, 204);
     } catch (err) {
       return respondWithError(c, err, "Failed to cancel registration");

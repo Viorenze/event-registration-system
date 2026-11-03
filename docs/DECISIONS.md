@@ -483,3 +483,118 @@
     - CI 红对照（PR #11）使用的是修复前的 `repeat.mjs`；新版失败路径由 `scripts/repeat.test.ts` 的“第 2 次迭代失败、退出码 42”用例覆盖。
 
 
+## 2026-11-01 S4b 独立审阅发现处理与全链路加固（DEV-S4B-01）
+
+- 选择：
+  - **审阅范围与材料包**：依据 2026-11-01 Sonnet 独立审阅（一次 review，材料包包含 51 个文件），对照代码库实际源码与测试进行逐项核验并分阶段实施修复与补测。
+  - **F-01 至 F-06 核对结论（阶段 1 核对结论）**：
+    - `F-01`（组织隔离与权限测试完整性）：CONFIRMED。`routesTable` 中的 `minRole` 未被任何测试读取；缺少普通成员访问 4 个 admin 路由得 403 且数据库不变的测试；缺少跨组织 `eventId` 得 404 测试；缺少非组织成员携带非法 UUID 参数得 403 优先于 400 的测试。
+    - `F-02`（测试覆盖与断言完备性）：CONFIRMED。C8 与 A1 重复取消夹具仅 1 confirmed 0 waitlisted 且缺少 `registrationId` 重复取消分支；C5、C4 及 `assertInvariants` 未断言候补 `seq` 递补顺序；A1 缺少 3 个 409 用例及拒绝前后全表快照；DEV-S4-05 中 M3 与 M6 记录不实。
+    - `F-03`（锁互斥与时钟交错测试覆盖）：CONFIRMED。`cancel`、`updateEvent`、`cancelEvent` 均缺乏锁等待（`wait_event_type = 'Lock'`）及等锁期间时钟交错（修改 `starts_at = clock_timestamp()` 后被拒 409）测试。
+    - `F-04`（Better Auth I7 团队管理拒绝断言精确性）：CONFIRMED。I7(c) 与 I7(d) 拒绝断言缺少具体错误码校验；I7(d) 夹具仅 1 个 Owner 无法区分“权限不足”与“唯一 Owner 保护”。
+    - `F-05`（角色默认值、循环依赖与错误类型）：CONFIRMED。`apps/api/src/index.ts` 存在 `?? "member"` / `?? "admin"` 回退；`cancel` 函数体未读取 `actor.role`；`registrations.ts` 与 `event-tx.ts` 存在循环导入；`DomainValidationError` 命名与结构未统一。
+    - `F-06`（基础设施与非功能性发现）：CONFIRMED（L1–L7 全部确认）。
+  - **各发现处理策略**：
+    - **已修（生产代码重构）**：F-05（删除 `actor.role` 与 `memberRole` 回退，抽取 `domain-error.ts` 消除循环导入）。
+    - **已补测（测试加固）**：F-01（`isolation.integration.test.ts` 实现全量参数化隔离测试 I1–I4）、F-02（加固 C8/A1/C5/C4、`assertInvariants` 增加 `maxConfirmedSeq < minWaitlistedSeq`、补齐 3 个 409 契约测试及全表快照）、F-03（`time-rules.concurrency.test.ts` 扩展 F-T1 锁互斥与 F-T2 时钟交错 6 个并发用例）、F-04（`team-management-i7.integration.test.ts` 补齐错误码精确断言与 2 个 Owner 场景）。
+    - **记入已知限制**：F-06（基础设施与非功能性限制只记不修，纳入 DEV-S4B-05 清单）。
+- 原因：系统性消灭审阅暴露的测试漏洞与代码隐患，强化多租户隔离与并发事务时序正确性。
+- 对应提交：
+  - 阶段 2a：`5da9571`（wip(s4b-2a): harden isolation, cancel/promote and I7 tests）
+  - 阶段 2b：`f080a8e`（wip(s4b-2b): remove unused actor.role, drop memberRole fallbacks, extract DomainError）
+  - 阶段 3：`db7628e`（wip(s4b-3): extend lock mutual exclusion and lock-wait clock interleaving tests to cancel, updateEvent, cancelEvent）
+  - （分支内 WIP 提交，squash 合并后不在 main 历史中，以对应 PR 为准）
+- 验证：**已验证（真实测试套件全绿）**——
+  - 并发测试数量由 13 个增至 19 个（运行 `vp test -c vite.concurrency.config.ts --run`，19 passed，耗时 ~9.3s）；
+  - 全量参数化隔离测试（`isolation.integration.test.ts` 55 passed）；
+  - D4 接口契约加固测试（`d4-api-contract.integration.test.ts` 24 passed）；
+  - I7 团队管理实测（`team-management-i7.integration.test.ts` 6 passed）；
+  - 全量集成测试（`vp test -c vite.integration.config.ts --run`，9 test files, 161 passed）。
+
+## 2026-11-01 更正 DEV-S4-05 变异测试记录与不变式命名（DEV-S4B-02）
+
+- 选择：更正 `DEV-S4-05` 历史条目中对变异实验 M3、M6 的不实记录与不变式命名混淆（原条目保持只读，以本条目为准）。
+- 更正细节：
+  - **M3 更正**：
+    - 原文声称：将候补递补排序改为 `seq DESC` 后，“C3 用例失败... C5 名额调大递补测试同样变红”。
+    - 事实：在提交 `b426434` 时，C5 测试代码只断言了 `confirmed.length === 12` 与 `waitlisted.length === 3`，以及调用原 `assertInvariants`；由于未断言 seq 递补顺序，调大容量时无论降序还是升序递补，confirmed 数量均增加 2 人达到 12 人，因此按代码阅读该说法在 `b426434` 上不成立（推断，未在 `b426434` 上重跑）；
+    - 加固后实测（2a）：在 `promoteWaitlisted` 中改为 `desc(registrations.seq)`，真实运行变红的用例为 C3、C8(new)、C5、C4（已验证）。
+  - **M6 更正**：
+    - 原文声称：删除取消报名中“已是 cancelled 则提前 noop”短路分支后，“C8 与 A1 重复取消断言失败”。
+    - 事实：原代码中该短路分支位于 `{ registrationId: string }` 分支内，而原 C8 测试两次取消均传入 `{ me: true }`，在 `inArray(status, ['confirmed', 'waitlisted'])` 未查到记录时由 `if (!myReg) return { kind: "noop" }` 提前返回，根本不走该分支，因此原 C8 仍绿（已验证）；
+    - 加固后实测（2a 重跑等价变异，在 2a 计划中记为 M4，删除 registrationId 分支里的 cancelled 短路）：原 C8 仍绿（原因同上），新加固的 C8（第二次使用 registrationId 重复取消）与 A1 如期变红（已验证）。
+  - **不变式命名纠正**：
+    - 原条目把 FIFO 称为 INV-3；
+    - 事实纠正：根据 `PRD.md` 规范，FIFO 递补顺序是业务规则 BR-7，INV-3 的锁定定义为“同一用户在同一活动里，有效报名最多一条”（同用户至多一条有效报名）。
+
+## 2026-11-01 F-05 代码重构与权限中间件 fail-closed 分析（DEV-S4B-03）
+
+- 选择：
+  - 在 `apps/api/src/registrations.ts` 中删除 `cancel` 函数签名的 `actor.role`，并将参数类型调整为 `actor: { userId: string }`；
+  - 在 `apps/api/src/index.ts` 中删除取消报名路由中读取 `c.get("memberRole")` 的两行及 `?? "admin"` / `?? "member"` 兜底默认值；
+  - 新建 `apps/api/src/domain-error.ts`，抽出 `DomainError` 类，并在 `registrations.ts` 中 re-export 以保持兼容，彻底消除 `apps/api/src/event-tx.ts` 与 `apps/api/src/registrations.ts` 间的循环导入；
+  - 业务接口角色权限闸门完全收敛至路由级中间件 `requireRole`。
+- 原因：消除死代码与冗余参数，打破循环模块依赖，杜绝在业务路由内私自回退角色权限。
+- 验证：
+  - 循环依赖消除证据（已验证）：`git grep -n "from \"./registrations" apps/api/src/event-tx.ts` 输出为空，确认无反向导入；
+  - 角色闸门生效验证（已验证）：M1a 变异实验中临时移除 `deleteRegistrationRoute` 与 `patchEventRoute` 的 `requireRole("admin")`，`isolation.integration.test.ts` 的 I4 测试确凿变红；
+  - 中间件 fail-closed 依据（代码阅读推断）：
+    - 依据 `apps/api/src/auth-middleware.ts:65-76`：
+      ```typescript
+      const role = c.get("memberRole");
+      const userLevel = ROLE_HIERARCHY[role];
+      const minLevel = ROLE_HIERARCHY[minRole];
+      if (userLevel === undefined || userLevel < minLevel) {
+        return c.json({ error: { code: "FORBIDDEN", message: "Insufficient permissions" } }, 403);
+      }
+      ```
+    - 当 `memberRole` 为 `undefined` 时，`ROLE_HIERARCHY[undefined]` 为 `undefined`，`userLevel === undefined` 为 `true`，返回 HTTP 403 `FORBIDDEN`（仅就该输入而言是 fail-closed；对 `Object.prototype` 同名键的角色串见下方实测，该表达式不返回 403）；
+    - 所有业务路由统一挂载于 `/api/orgs/:orgId/*`，通过 `baseApp.use("/api/orgs/:orgId/*", orgAuthMiddleware)` 先行执行前缀拦截，查询数据库 `member` 表后注入 `memberRole`，确保进入 `requireRole` 前角色已初始化；role 取自 member 表。对 `apps/api/src/auth-middleware.ts` 第 67–73 行判断表达式副本的实测（`ROLE_HIERARCHY = { member: 1, admin: 2, owner: 3 }`，minRole 取 `"admin"`）：
+      - 得到 PASS 的 role 值为：`admin`、`owner`、`constructor`、`toString`、`valueOf`、`hasOwnProperty`、`__proto__`；
+      - 得到 403 的 role 值为：`member`、未知值 `x`、`undefined`；
+      - （注明：这是对该判断表达式副本的实测，不是对中间件本身的测试）。
+      - 关于角色串能否被写入 member.role：Better Auth 的 `/organization/update-member-role` 端点（`crud-members.mjs` 第 311–312 行）对 role 字符串有白名单校验，白名单是 `Object.keys(defaultRoles)` 加 `orgOptions.roles` 的键；invite 路径在 `crud-invites.mjs` 第 121–122 行抛 `ROLE_NOT_FOUND`（该文件第 104–107 行构造 `validStaticRoles` 并过滤出 `unknownRoles`）；auth.ts 中未见相关配置；其他写入路径未验证。
+      - 结论：对 `constructor`、`toString`、`valueOf`、`hasOwnProperty`、`__proto__` 这几个角色串，该判断表达式（副本）不返回 403，即对这类输入是 fail-open。目前未发现可写入路径（见上一条），不在本 PR 修复；记入 DEV-S4B-05 第 13 项，后续作为单独小切片处理（先写失败的测试，再改）。
+  - 未统一项说明：`apps/api/src/index.ts:12` 中仍保留本地定义的 `DomainValidationError`，未统一迁入 `apps/api/src/domain-error.ts` 的 `DomainError`（`apps/api/src/http-errors.ts` 第 2 行已导入 `./domain-error.ts` 的 `DomainError`）（依 L7 确认）。
+
+## 2026-11-01 Better Auth 团队管理端点行为实测与更正（DEV-S4B-04）
+
+- 选择：修订 DEV-S4 关于 I7 团队管理端点的实测记录（原条目保持只读，以本条目为准）。
+- 实测结果（2a 探针真实执行）：
+  - **I7(c) 成员修改与移除操作**：
+    - 普通 member 修改成员角色：HTTP 403，错误码 `YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER`（已验证）；
+    - 非成员修改成员角色：HTTP 400，错误码 `MEMBER_NOT_FOUND`（已验证）；
+    - 普通 member 移除成员：HTTP 401，错误码 `YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_MEMBER`（此前 DEV-S4 记为 403，实测更正为 401，已更正、已验证）；
+    - 非成员移除成员：HTTP 400，错误码 `MEMBER_NOT_FOUND`（已验证）。
+  - **I7(d) Owner 操作与多 Owner 场景**：
+    - 单 Owner 场景：Admin 尝试修改 Owner 角色返回 HTTP 403（`YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER`）；Admin 尝试移除 Owner 返回 HTTP 400（`YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`）（已验证）；
+    - 双 Owner 场景（新补测）：组织内创建 2 个 Owner（`owner1` 与 `owner2`）及 1 个 Admin；Admin 尝试移除 `owner2` 时，返回的仍是 HTTP 400 `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`；Admin 尝试降级 `owner2` 返回 HTTP 403；对照组 `owner1` 降级 `owner2` 返回 HTTP 200（已验证）。
+- 源码依据（已阅读 `node_modules/better-auth`）：
+  - 依据 `better-auth@1.7.11`（`node_modules/.pnpm/better-auth@1.7.11_drizzle-_1df9f2d0665fbbb8ce4a949a1aa41103/node_modules/better-auth/dist/plugins/organization/routes/crud-members.mjs` 第 193–201 行）：当待移除成员的角色含 `creatorRole`（默认 `"owner"`）时，(1) 若调用者角色不含 `creatorRole`，第 196 行直接抛 400 `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`，不依赖 owner 人数；(2) 只有调用者角色含 `creatorRole` 才会进入第 197–200 行，按 owner 人数（≤1）抛同一错误码；
+  - 因此该错误码名称对非 owner 调用者有误导性。经该移除成员接口，非 owner（含 admin）移除 owner 在源码和实测中均被拒绝；其他途径（如退出团队接口、直接改库）未验证。
+  - DEV-S4-02 决策 6 里“多 owner 额外用例延期”现已在 `team-management-i7.integration.test.ts` 中补测完成（已验证）。
+
+## 2026-11-01 S4b 已知限制与未验证项清单（DEV-S4B-05）
+
+- 选择：登记 S4b 审阅确认的已知限制与未验证项清单（全部只记不修，保持系统现状）。
+- 内容：
+  - **1. 连接池错误静默吞掉（L1，已验证）**：`apps/api/src/auth.ts:14` 存在无条件 `poolClient.on("error", () => {})`，导致无论测试还是生产环境，连接池未捕获错误均被静默吞掉。
+  - **2. 无请求体 POST 缺少 Origin 校验（L2，已验证）**：在 `apps/api/src` 的非测试代码中，除 `env.ts`、`auth.ts` 的 Better Auth `trustedOrigins` 配置外，自建业务路由与中间件层（`index.ts`、`auth-middleware.ts`）均未见 Origin 或 CSRF 校验逻辑（针对自建无请求体 POST 路由如 `POST …/registrations`、`POST …/cancel`，依赖 Session Cookie 的 `SameSite=Lax` 机制防范跨站请求伪造）。
+  - **3. 测试失败时可能在 `process.cwd()` 残留临时文件（L3，已验证）**：`apps/api/src/registrations.integration.test.ts` 在执行时通过 `path.resolve(process.cwd(), "tmp_i3_evidence.json")` 向 `process.cwd()` 写入临时文件；删除调用位于第 582 行（仅用内部 try/catch 包裹，无测试级 try/finally 或 afterEach 保护），位于被拒调用统一断言（第 586–590 行）之前；若前置请求或断言失败，执行流程在第 582 行前中断，无法触发清理。
+  - **4. CI 镜像标签浮动与缺 porcelain 检查（L4，已验证）**：`docker-compose.yml:5` 使用 `postgres:18.6-alpine`，而 `.github/workflows/ci.yml:50,93,153` 使用浮动大版本标签 `postgres:18-alpine`；CI 第 146 行仅用 `git diff --exit-code packages/db/drizzle`，缺少 `git status --porcelain`，无法检测 Drizzle 产生的未跟踪新文件。
+  - **5. Dockerfile 硬编码镜像源与以 root 运行（L5，已验证）**：`apps/api/Dockerfile` 第 4、6 行硬编码 `registry.npmmirror.com`，且全文件缺少 `USER` 指令，容器在 apps/api 的 Docker 镜像中以默认 root 身份运行；经核验 `apps/web/Dockerfile` 同样缺少 `USER` 指令（grep 无 USER 命中，exit code 1）。
+  - **6. `member` 表无 `(organization_id, user_id)` 唯一约束（L6，已验证）**：`packages/db/drizzle/0000_auth_tables.sql` 中 `member` 表缺少复合唯一约束。根据 PRD 锁定规则不改动认证表结构，保持现状。
+  - **7. `DomainValidationError` 未统一（L7，已验证）**：`apps/api/src/index.ts:12` 仍本地定义并使用 `DomainValidationError`，未统一合并进 `apps/api/src/domain-error.ts` 的 `DomainError`（`apps/api/src/http-errors.ts` 第 2 行已导入 `./domain-error.ts` 的 `DomainError`）。
+  - **8. PRD 第 7、8 节占位符未回填**：PRD.md 中“实测后写入本表”占位符保留，留待 S7 阶段经作者批准后统一回填。
+  - **9. N1 与 N2 变异实测证据（已验证）**：
+    - **N1 变异（`lockEventAndReadClock` 移除 `.for("update")`）**：共 9 个用例变红、10 个用例仍绿（19 个用例总数不变）。
+      - 变红用例（9 个）：`C1: 50 different users simultaneously register for event with 10 capacity`、`C2: same user calls register concurrently 10 times, exactly 1 active registration and idempotent responses`、`C7: Connection A holds FOR NO KEY UPDATE while B calls register, observing Lock wait and release`、`C4: concurrent 3 cancels and 20 new registrations; final state satisfies invariants`、`C6: deterministic lock interleaving: B waits on event row lock, A updates deadline with clock_timestamp(), B receives REGISTRATION_CLOSED`、`F-T1 cancel: Connection A holds FOR NO KEY UPDATE, B calls cancel, observing Lock wait and release -> cancelled`、`F-T2 cancel: Connection A holds lock, B calls cancel and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged`、`F-T2 updateEvent: Connection A holds lock, B calls updateEvent with capacity and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged`、`F-T2 cancelEvent: Connection A holds lock, B calls cancelEvent and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged`；
+      - 仍绿用例：只记录 `F-T1 updateEvent`、`F-T1 cancelEvent` 仍绿（依据是它们不在 N1 的失败清单里，19 个用例总数不变，不列出其他通过用例的名字）；
+      - 分析说明：F-T1 中的 `updateEvent` 与 `cancelEvent` 在 N1 下仍绿（推测“它们自己的 UPDATE 会加锁”，推测，未验证）；在 F-T2 下 `F-T2 updateEvent` 与 `F-T2 cancelEvent` 均变红。
+    - **N2 变异（`lockEventAndReadClock` 中 `clock_timestamp()` 替换为 `now()`）**：共 4 个用例变红、15 个用例仍绿（19 个用例总数不变）。
+      - 变红用例（4 个）：`C6: deterministic lock interleaving: B waits on event row lock, A updates deadline with clock_timestamp(), B receives REGISTRATION_CLOSED`、`F-T2 cancel: Connection A holds lock, B calls cancel and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged`、`F-T2 updateEvent: Connection A holds lock, B calls updateEvent with capacity and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged`、`F-T2 cancelEvent: Connection A holds lock, B calls cancelEvent and blocks, A updates starts_at to clock_timestamp() -> B rejected with EVENT_STARTED and DB unchanged`；
+      - 其余 15 个用例不在失败清单中，保持绿灯。
+  - **10. M2 变异下的纵深防御（已验证）**：`DELETE …/:registrationId` 在 M2 变异（事务中去掉 eventId 过滤）下仍保持绿，原因是业务 SQL 在查询报名记录时带有 `organization_id` 与 `registration_id` 的双重过滤，属于纵深防御。
+  - **11. G2–G4 前端类型守卫负向实验（未验证）**：`apps/web/src/types/api-client-guard.ts` 的类型守卫负向破坏性实验仍保留为证据缺口。
+  - **12. I3 全量参数化路由夹具约束**：`isolation.integration.test.ts` 中 I3 参数化测试遍历 `routesTable` 时，要求新增路由必须在 `route-fixtures.ts` 中配置对应夹具，否则测试会直接失败（设计如此）。
+  - **13. `requireRole` 对 `Object.prototype` 同名键的角色串 fail-open（已验证表达式副本，中间件本身未测）**：`ROLE_HIERARCHY` 是普通对象字面量，实测见 DEV-S4B-03。目前未发现可写入 `member.role` 的路径，列为已知限制；后续单独切片先写测试再改。

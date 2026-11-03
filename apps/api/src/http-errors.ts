@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { DomainError } from "./registrations.ts";
+import { DomainError } from "./domain-error.ts";
 
 export interface HttpErrorResponse {
   status: 400 | 404 | 409 | 500;
