@@ -553,7 +553,7 @@
       - 得到 PASS 的 role 值为：`admin`、`owner`、`constructor`、`toString`、`valueOf`、`hasOwnProperty`、`__proto__`；
       - 得到 403 的 role 值为：`member`、未知值 `x`、`undefined`；
       - （注明：这是对该判断表达式副本的实测，不是对中间件本身的测试）。
-      - 关于角色串能否被写入 member.role：Better Auth 的 `/organization/update-member-role` 端点（`crud-members.mjs` 第 311–312 行）对 role 字符串有白名单校验，白名单是 `Object.keys(defaultRoles)` 加 `orgOptions.roles` 的键；invite 路径在 `crud-invites.mjs` 第 121–122 行抛 `ROLE_NOT_FOUND`（校验写法以 A2(b) 输出为准，第 104–107 行构造 `validStaticRoles` 过滤 `unknownRoles`）；auth.ts 中未见相关配置；其他写入路径未验证。
+      - 关于角色串能否被写入 member.role：Better Auth 的 `/organization/update-member-role` 端点（`crud-members.mjs` 第 311–312 行）对 role 字符串有白名单校验，白名单是 `Object.keys(defaultRoles)` 加 `orgOptions.roles` 的键；invite 路径在 `crud-invites.mjs` 第 121–122 行抛 `ROLE_NOT_FOUND`（该文件第 104–107 行构造 `validStaticRoles` 并过滤出 `unknownRoles`）；auth.ts 中未见相关配置；其他写入路径未验证。
       - 结论：对 `constructor`、`toString`、`valueOf`、`hasOwnProperty`、`__proto__` 这几个角色串，该判断表达式（副本）不返回 403，即对这类输入是 fail-open。目前未发现可写入路径（见上一条），不在本 PR 修复；记入 DEV-S4B-05 第 13 项，后续作为单独小切片处理（先写失败的测试，再改）。
   - 未统一项说明：`apps/api/src/index.ts:12` 中仍保留本地定义的 `DomainValidationError`，未统一迁入 `apps/api/src/domain-error.ts` 的 `DomainError`（`apps/api/src/http-errors.ts` 第 2 行已导入 `./domain-error.ts` 的 `DomainError`）（依 L7 确认）。
 
