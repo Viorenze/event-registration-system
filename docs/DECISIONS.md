@@ -598,3 +598,152 @@
   - **11. G2–G4 前端类型守卫负向实验（未验证）**：`apps/web/src/types/api-client-guard.ts` 的类型守卫负向破坏性实验仍保留为证据缺口。
   - **12. I3 全量参数化路由夹具约束**：`isolation.integration.test.ts` 中 I3 参数化测试遍历 `routesTable` 时，要求新增路由必须在 `route-fixtures.ts` 中配置对应夹具，否则测试会直接失败（设计如此）。
   - **13. `requireRole` 对 `Object.prototype` 同名键的角色串 fail-open（已验证表达式副本，中间件本身未测）**：`ROLE_HIERARCHY` 是普通对象字面量，实测见 DEV-S4B-03。目前未发现可写入 `member.role` 的路径，列为已知限制；后续单独切片先写测试再改。
+
+## 2026-11-06 S5 已批准决定与计划变化（DEV-S5-01）
+
+- 选择：
+  - Next.js 只做界面，不写 Next middleware 判断登录，不在 Next 里处理会话；所有页面是客户端组件，请求同源 `/api/*`：认证走 `/api/auth/*`，用原生 fetch（沿用现有做法，不引入 better-auth 客户端依赖）；业务走 `hc<AppType>` RPC；收到 401 显示登录；UI 里的角色判断只用于显隐，权限由服务端中间件执行；当前用户在某团队的角色，从 `GET /api/orgs/:orgId/members`（member+，含 userId、name、role）里按会话用户 id 取，不新增接口；
+  - 详情与名单两个读接口按下文实现；列表计数已存在，不改；
+  - 前端依赖共 8 个：`tailwindcss 4.3.4`、`@tailwindcss/postcss 4.3.4`、`postcss 8.5.32`、`class-variance-authority 0.7.1`、`clsx 2.1.1`、`tailwind-merge 3.7.0`、`@radix-ui/react-slot 1.5.0`、`@radix-ui/react-label 2.1.17`；不装 lucide-react 和 tw-animate-css；不运行 shadcn CLI，从 registry 取源码手工放入；
+  - 邀请链接用 `/invite#<邀请id>`；未登录时邀请页内嵌登录和注册表单，不跳转；接受后用 history.replaceState 清掉片段；不 console.log 链接，不存 localStorage 或 sessionStorage；复制失败时退回只读输入框；
+  - 创建团队的 slug 由前端自动生成（team- 加 8 位随机串）；邀请角色下拉只给 member 和 admin；界面文案用中文。
+- 原因：
+  - 遵循 AGENTS 规则 1（Next.js 只做界面）与 PRD 第 10 节验收要求；
+  - 邀请链接视为机密（PRD 第 11 节），URL 片段不会发给任何服务器，不进访问日志；
+  - 控制前端依赖体积与范围，避免引入未锁定的组件库 CLI 与图标库。
+- 备选：
+  - Next middleware 处理会话、引入 better-auth 客户端依赖、运行 shadcn CLI、URL 查询参数传递邀请 id。
+- 验证：
+  - 计划的核对步骤（结果见 DEV-S5-03、DEV-S5-04）：S5-2 开头执行两道只读门禁：(1) 核实 baseOrganizationSchema、baseInvitationSchema、acceptInvitationBodySchema 的定义原文，以及创建组织的返回值；(2) 原样打印 shadcn registry 对 6 个组件的依赖字段，核对依赖清单。
+
+## 2026-11-06 后端读接口与 S5-1 变异实验（DEV-S5-02）
+
+- 选择：
+  - 新增活动详情读接口 `GET /api/orgs/:orgId/events/:eventId`（member+）与活动报名名单读接口 `GET /api/orgs/:orgId/events/:eventId/registrations`（admin+）；
+  - 名单接口不分页（候补长度无上限），S7 README 已知限制如实写；
+  - `getEventRegistrations` 有一个未使用的 `_userId` 参数；两个新 handler 未复用 `respondWithError`；`c.get("user")` 使用了 `as { id: string }` 断言（均为非阻塞，保持原样）。
+- 原因：
+  - 满足前端详情页展示、我的报名状态获取以及管理面板名单查看的需要；
+  - 保持最小实现与现有代码结构，非阻塞项暂不重构。
+- 验证：
+  - S5-1 变异实验 R1–R8（含 R7b）：来源材料只保留了 R4 的结论，本记录不含其余各项的逐项结果；R4 实际变红 D-3、D-4，D-2 未变红，原因未核实；
+  - R-5（读接口调用前后数据库快照不变）没有任何变异覆盖，未验证其能抓到写入类回归；
+  - D-7、D-8 通过调用栈文件名（"event-reads.ts"）区分中间件与 handler 的 db.select 调用来测 K；文件改名或栈格式变化会使 K 变大、响应变 200，测试变红（不会假绿），但需同步修改；
+  - 本地 pnpm gate 在 S5 实现终点全绿（单元 9、集成 187、并发 19、迁移校验通过、next build 路由 6 条）；docker-build 与重复 5 次的并发 job 只在 CI 运行，本条写入时尚未运行。
+
+## 2026-11-06 前端依赖与 shadcn 源码处理（DEV-S5-03）
+
+- 选择：
+  - 6 个组件（button、input、label、card、badge、table）源码取自 new-york-v4 registry 原始 JSON，不运行 shadcn CLI，手工放入；
+  - 原始 registry 依赖统一包 `radix-ui`（出现在 button、label、badge），不在已批准清单，手工放入时把 import 改写为已批准的 `@radix-ui/react-slot`、`@radix-ui/react-label`，并将 `cn` 改写为 `../../lib/utils`、`Slot.Root` 改写为 `Slot`，不新增依赖；
+  - dark 变体改成类选择器（`@custom-variant dark`），不做暗色模式；
+  - 以后只采信原始 JSON（早先的 registry 摘要输出把 files 折叠为字符串，并把 "cn" 列成依赖，不是原始 JSON）。
+- 原因：
+  - 严格遵守已批准的 8 个前端依赖清单，避免引入未经批准的包或运行 CLI 产生未审查代码；
+  - 适配 Tailwind v4 规范与项目既有工具路径。
+- 验证：
+  - 源码放入后经 `vp check --fix` 格式化，格式化差异已逐文件核对：仅为分号、尾逗号和折行，无 class 字符串或逻辑改动（git diff --no-index -w 对照，行数与 stat 一致）；
+  - 安装后 `pnpm install --frozen-lockfile` 输出 “Packages: +6 -5”，-5 对应锁文件 snapshots 中被替换的 5 项 vite/vitest/@vitest 变体：版本不变，仅 peer 后缀新增 jiti@2.7.0（推断：jiti 作为 tailwindcss 的传递依赖进入依赖树；未单独验证）；packages 段删除 0 条、新增 31 条，均为 8 个已批准依赖及其传递依赖；+6 未逐项对应；根 importer 的 vite-plus 解析为带 jiti 的变体，apps/api 的仍为不带 jiti 的变体，两个变体并存，原因未核实；
+  - `next build` 产物 CSS 中没有 `--color-primary`（`@theme inline` 把工具类直接展开为 `var(--primary)`）；`:root` 里有 `--primary` 和 `--radius`，`.bg-primary` 声明存在；去掉 `layout.tsx` 的 globals.css import 后 CSS 文件消失（红对照）；S5-2b 首轮的检查项把 `--color-primary` 当成应有项，是检查项写错，不是构建缺陷。
+  - 本地手动构建 API、Web 两个镜像（`docker build`）退出码均为 0；该检查不在 `pnpm gate` 内，CI 的 docker-build job 本条写入时尚未运行。
+
+## 2026-11-06 前端实现要点与已知小缺口（DEV-S5-04）
+
+- 选择：
+  - 邀请接口 `organizationId` 缺省会回落到 `session.activeOrganizationId`（crud-invites.mjs 第 85 行，已核实），前端不设置 active organization，显式传递 `organizationId`；邀请 id 只存在于组件状态和只读输入框，不进日志、存储、地址栏；
+  - 前端对 Better Auth 响应的字段使用（organization/list 每项的 id、name、slug；accept-invitation 的返回）按源码与类型做运行时收窄；
+  - 退出时清空团队列表，邀请页接受失败返回 401 时重新读会话；首页团队列表加载失败显示错误而不是"还没有团队"；退出失败时不清空列表；注册密码输入加 minLength=8（Better Auth 默认最小密码长度为 8，create-context.mjs 第 186 行）；
+  - 活动列表分页采用"请求 21 条、显示 20 条"判断是否有下一页，不依赖总数；`api-calls.ts` 的错误体解析与 `auth-client.ts` 重复，保持刻意不改已审阅代码；
+  - 详情页首次加载失败显示 loadError，刷新失败保留已显示内容并在 actionError 显示；界面按钮不使用前端时钟判断截止或开始，以服务端校验与 409 状态码为准；创建活动表单里的“开始时间必须在未来”等校验只是前端提示，以服务端校验为准；
+  - 后端规则规定请求体只要包含 `capacity` 键，活动开始后一律返回 409 `EVENT_STARTED`（即使数值未变）；因此修改活动表单按"挂载时或上次保存成功后的基线"对比字段，名额未改则不带 `capacity`，说明清空发 null、未改不带；PATCH 与取消活动成功后重新调用 `getEventDetail` 刷新；活动已取消时隐藏修改表单、取消活动按钮与名单中的取消按钮；
+  - 编码约束：`api-client-guard.ts` 之外的新前端文件不得使用类型断言 `as`（仅允许 `as const` 与 import 别名）、`any`、`@ts-ignore`、`@ts-expect-error`、`console.*`、`localStorage`/`sessionStorage`/`cookie`、`dangerouslySetInnerHTML`、Next middleware。
+- 原因：
+  - 保证与服务端契约及 Better Auth 行为严格一致，规避静默错误；
+  - 保持前端无状态、只做界面的原则，依靠服务端保证事务与数据一致性。
+- 验证：
+  - S5-3a 阶段 `vp check` 退出码 0（65 个文件），禁用项扫描（as、any、console、存储、cookie、dangerouslySetInnerHTML、middleware、非空断言）计数为 0（该扫描只在 S5-3a 阶段记录过，之后新增文件的同类扫描结果本记录没有）；S5-3b-2 阶段 `next build` 构建成功，路由表包含 `/`、`/_not-found`、`/invite`、`/orgs/[orgId]`、`/orgs/[orgId]/events/[eventId]`；
+  - 前端页面运行行为无自动化测试，靠作者手工走通（手工报告，非自动化证据）；
+  - 审阅中发现并修复：`page.tsx` 把 `useSession()` 返回的整个对象放进 `useCallback`/`useEffect` 依赖导致每次渲染都重新请求 `organization/list`，该缺陷 vp check 与 next build 均无法发现，靠审阅中发现，修复后的运行行为由作者手工走通（手工报告，非自动化证据）确认；
+  - `useSession` 的 `reload` 是 `useCallback(..., [])`（use-session.ts 第 20–36 行），引用稳定，已由读代码确认；运行时行为由作者手工走通（手工报告，非自动化证据）确认；
+  - S6 Playwright 注意事项：前端取消报名、取消他人报名、取消活动使用 `window.confirm`，Playwright 默认自动取消对话框，E2 测试步骤须先注册 `page.on('dialog', (d) => d.accept())`。
+- 已知小缺口：
+  - 创建活动表单的说明 textarea 没有 maxLength，超过 2000 字时服务端返回英文 VALIDATION 消息；
+  - `api-calls.ts` 里导出的类型名 `EventDetail` 实际是创建活动的响应（无 confirmedCount、waitlistedCount、myRegistration），需注意避免与真正的详情类型混淆；
+  - 详情页在同一组件不重新挂载时切换 eventId 不会重置 detail（UI 内从列表进入会重新挂载，正常路径走不到）；
+  - 报名/取消提交后、详情刷新返回前按钮可再次点击（后端接口幂等）；
+  - EditEventForm 的基线只在挂载和保存成功后更新，其他管理员的改动不会自动同步到表单；详情页管理区的 busy 状态（名单取消、修改、取消活动）互相独立；修改表单提交期间输入框未禁用；
+  - 没有邀请列表、重发、取消邀请的界面；同一邮箱已有待处理邀请时再次邀请会被后端拒绝，邀请链接丢失后无法在界面找回；成员页 `GET members` 请求出现两次（useOrgRole 与列表）。
+
+## 2026-11-06 手工走通与发现的缺陷（DEV-S5-05）
+
+- 选择：
+  - `auth-client.ts` 的 `signOut` 请求补充请求头 `Content-Type: application/json` 与请求体 `"{}"`；
+  - 本地 .env 缺 Compose 必需变量，已补齐，值不记录。
+- 原因：
+  - Better Auth（经 better-call 1.4.2，utils.mjs 第 15 行）对无请求体、无 Content-Type 的 POST 请求返回 415 `UNSUPPORTED_MEDIA_TYPE`（消息 "Content-Type is required. Allowed types: application/json"），导致点退出时界面弹出报错且会话未清除；
+  - 经同源代理取证：对 `/api/auth/sign-out` 发送无 Content-Type、无体 POST 返回 415，补充请求头与 `{}` 体后返回 200 `{"success":true}` 并清除 cookie（该 curl 未带会话 cookie，未验证带会话时服务端会话的删除（之后作者手工重测 1.4 通过，见 DEV-S5-05 的验证部分；手工报告中没有 session 表的查库核对））；
+  - 该缺陷 vp check 与 next build 均无法发现，靠作者手工走通（手工报告，非自动化证据）发现。
+- 验证：
+  - 分阶段清单有一处期望值纠正：活动取消报名后的期望原写为"已确认 0/1"，实际因候补递补正确应为已确认 1/1、候补 0、原用户未报名，作者手工走通（手工报告，非自动化证据）确认行为正确；
+  - 手工走通 2.7 中 Network 过滤 events 出现 3 条请求：`events?limit=21&offset=0`（200，符合设计），另两条路径为活动 UUID（GET 200，低优先级，推测为 Next 对列表链接的预取，未证实，不阻塞）；
+  - api 镜像各层为 CACHED；容器内 apps/api/src 的 index.ts、event-reads.ts、routes-table.ts 与当前分支 HEAD 一致（仅比对这三个文件）；此前 docker compose ps 没列出 migrate 容器是因为未加 `-a`，`ps -a` 显示 migrate 为 Exited (0)；
+  - 分阶段清单（编号 1.1–7.8，覆盖本地手工清单中积压项（清单文件未入库））中，除 1.4 外，作者手工走通（手工报告，非自动化证据）确认其余编号全部通过；
+  - 作者手工走通（手工报告，非自动化证据）重测 1.4（退出）6 项全部通过（点退出回到登录表单、sign-out 请求 200 一次、刷新后仍未登录、能重新登录且团队列表还在）。
+
+## 2026-11-06 前端类型守卫 G2–G4 负向实验（DEV-S5-06）
+
+- 选择：
+  - 在 `api-client-guard.ts` 中为新增的四条路由补齐正向守卫（GET 详情、GET 名单、DELETE registrations/:registrationId、POST cancel），各含 IsAny 断言、路径参数 Equal 断言以及 1 个 @ts-expect-error 负向用例（n7–n10），未加响应类型断言；
+  - `AppType` 当前定义在 `apps/api/src/index.ts` 第 1047 行，写法为 `typeof app`；
+  - 执行 G2–G4 负向类型实验验证守卫有效性（均在本地执行，只在工作区修改并反向还原，未提交；未在 CI 上重复）。
+- 原因：
+  - 补齐 S4b 遗留的类型守卫负向有效性证据缺口，确认 API 契约破损时编译与类型检查能够捕获。
+- 验证：
+  - **G2 实验（修改 AppType）**：`apps/api/src/index.ts` 第 1047 行 `AppType` 分别改为 `any`、`unknown`、`{}`，`vp check` 均退出码 1；错误码 G2a 为 TS2339、TS2578，G2b 为 TS2344、TS18046、TS2339、TS2578，G2c 为 TS2740、TS18046、TS2339、TS2578；报错同时出现在 api-client.ts、api-calls.ts 的使用处以及未用的 @ts-expect-error；证明整体会变红，没有单独证明仅靠守卫文件即可抓到；G2 未逐条核对报错路径（限制保留）；
+  - **G3 实验（修改守卫参数键）**：把 `api-client-guard.ts` 里 `P3DeleteRegistration` 的参数键写为 `registrationIdX`，`vp check` 退出码 1，报错 TS2339（api-client-guard.ts:110）；
+  - **G4-a 实验（修改页面使用的属性名）**：`events/[eventId]/page.tsx` 里属性由 `detail.confirmedCount` 改为 `detail.confirmedCnt`，`vp check` 与 `next build` 均退出码 1 报 TS2551；next build 在 "Compiled successfully" 之后的 Running TypeScript 阶段报出；两者各自独立，无谁先抓到的结论；测到的是页面与手写类型 EventDetailView 之间的连接，不是 RPC 响应类型与手写类型之间的连接；
+  - **G4-b 实验（修改手写接收类型）**：
+    - G4-b1（confirmedCount 改为 string）：`vp check` 退出码 1 报 2 个 TS2322（位置在 api-calls.ts:100:24 与 209:24，按行号推断对应 listEvents 与 getEventDetail）；`next build` 退出码 1 报同样 2 个 TS2322、同样位置，在 Running TypeScript 阶段报出；
+    - G4-b2（MyRegistration 的 status 改为 "confirmed"）：`vp check` 退出码 1 报 1 个 TS2322（api-calls.ts:209:24）；`next build` 退出码 1 报同样 1 个 TS2322；构建详情指出 "waitlisted" 不能赋给 "confirmed"；
+    - 结论：getEventDetail 与 listEvents 两处 RPC 响应赋给手写类型的连接，类型不兼容时 vp check 与 next build 各自独立变红；
+  - 限制说明：G4-b 只覆盖 listEvents 与 getEventDetail 两处，listEventRegistrations、registerForEvent、listMembers 以及 PATCH、取消活动的响应赋值未做实验；"后端新增字段不会被抓到"仅由代码阅读得出、未做实验。
+
+## 2026-11-06 S5 未验证项与已知限制汇总（DEV-S5-07）
+
+- 选择：
+  - 汇总 S5 实施与审阅过程中记录的未验证项与已知限制清单（全部只记不修，保持系统现状）。
+- 原因：
+  - 如实记录系统边界、证据缺口与后续注意事项，不隐藏任何已知问题。
+- 内容：
+  - **1. 变异实验未覆盖与未核实项**：
+    - R-5（读接口调用前后数据库快照不变）没有任何变异覆盖，未验证其能抓到写入类回归；
+    - R4 实际变红 D-3、D-4，D-2 未变红原因未核实；
+    - D-7、D-8 通过调用栈文件名（"event-reads.ts"）区分中间件与 handler 的 db.select 调用来测 K；文件改名或栈格式变化会使 K 变大、响应变 200，测试变红（不会假绿），但需同步修改。
+  - **2. 依赖与锁文件未核实项**：
+    - 根 importer 的 vite-plus 解析为带 jiti 的变体，apps/api 的仍为不带 jiti 的变体，两个变体并存原因未核实；
+    - jiti 作为 tailwindcss 的传递依赖进入依赖树的推断未单独验证；
+    - 安装后 packages 段新增 31 条（8 个已批准依赖及其传递依赖），+6 未逐项对应。
+  - **3. 后端接口设计限制**：
+    - 名单接口不分页（候补长度无上限），S7 README 如实写；
+    - getEventRegistrations 有一个未使用的 _userId 参数；两个新 handler 未复用 respondWithError；c.get("user") 使用了 as { id: string } 断言；
+    - requireRole 对 Object.prototype 同名键的 fail-open 沿用 DEV-S4B-05 第 13 条。
+  - **4. 前端类型守卫实验边界**：
+    - G2 未逐条核对报错路径；证明整体会变红，没有单独证明仅靠守卫文件即可抓到；
+    - G4-b 只覆盖 listEvents 与 getEventDetail 两处，listEventRegistrations、registerForEvent、listMembers 以及 PATCH、取消活动的响应赋值未做实验；
+    - "后端新增字段不会被抓到"仅由代码阅读得出、未做实验。
+  - **5. 前端运行行为与验证限制**：
+    - 前端页面运行行为无自动化测试，仅有 vp check、next build 和作者手工走通（手工报告，非自动化证据）；
+    - organization/list 处理函数只返回适配器的 listOrganizations 结果，每项字段源码未给出；手工清单含该响应字段的核对项（S5-3c 清单第 (4) 项；清单为本地文件，未入库），作者手工报告全部通过（非自动化证据）；
+    - curl 对 `/api/auth/sign-out` 未带会话 cookie，未验证带会话时服务端会话的删除（之后作者手工重测 1.4 通过，见 DEV-S5-05 的验证部分；手工报告中没有 session 表的查库核对）；
+    - 本地 .env 缺 Compose 必需变量，已补齐，值不记录；
+    - 手工走通 2.7 中 Network 过滤 events 出现两条活动 UUID 请求推测为 Next 对列表链接的预取未证实；
+    - api 镜像仅比对容器内 index.ts、event-reads.ts、routes-table.ts 三个文件。
+  - **6. 前端已知小缺口与功能限制**：
+    - 创建活动表单的说明 textarea 没有 maxLength，超过 2000 字时服务端返回英文 VALIDATION 消息；
+    - `api-calls.ts` 里导出的类型名 `EventDetail` 实际是创建活动的响应（无 confirmedCount、waitlistedCount、myRegistration），需注意避免与真正的详情类型混淆；
+    - 详情页在同一组件不重新挂载时切换 eventId 不会重置 detail；报名/取消提交后、详情刷新返回前按钮可再次点击（后端接口幂等）；
+    - EditEventForm 的基线只在挂载和保存成功后更新，其他管理员的改动不会自动同步到表单；详情页管理区的 busy 状态互相独立；修改表单提交期间输入框未禁用；
+    - 没有邀请列表、重发、取消邀请的界面；同一邮箱已有待处理邀请时再次邀请会被后端拒绝，邀请链接丢失后无法在界面找回；
+    - 成员页 `GET members` 请求出现两次（useOrgRole 与列表）。
+- 验证：
+  - 本地 pnpm gate 在 S5 实现终点全绿（单元 9、集成 187、并发 19、迁移校验通过、next build 路由 6 条）；docker-build 与重复 5 次的并发 job 只在 CI 运行，本条写入时尚未运行。

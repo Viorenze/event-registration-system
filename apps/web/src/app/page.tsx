@@ -1,233 +1,207 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-interface SessionData {
-  user: {
-    id: string;
-    email: string;
-    name: string;
-  };
-  session: {
-    id: string;
-    expiresAt: string;
-  };
-}
+import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
+import { AuthForm } from "../components/auth-form";
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import {
+  createOrganization,
+  generateTeamSlug,
+  listOrganizations,
+  signOut,
+  type OrganizationItem,
+} from "../lib/auth-client";
+import { useSession } from "../lib/use-session";
 
 export default function HomePage() {
-  const [session, setSession] = useState<SessionData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState("");
+  const { status, user, error: sessionError, reload } = useSession();
+  const [organizations, setOrganizations] = useState<OrganizationItem[]>([]);
+  const [orgsError, setOrgsError] = useState("");
+  const [loadingOrgs, setLoadingOrgs] = useState(false);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const [forcedAnonymous, setForcedAnonymous] = useState(false);
 
-  // Sign up fields
-  const [signUpName, setSignUpName] = useState("");
-  const [signUpEmail, setSignUpEmail] = useState("");
-  const [signUpPassword, setSignUpPassword] = useState("");
-
-  // Sign in fields
-  const [signInEmail, setSignInEmail] = useState("");
-  const [signInPassword, setSignInPassword] = useState("");
-
-  const refreshSession = async () => {
-    try {
-      const res = await fetch("/api/auth/get-session", {
-        credentials: "include",
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setSession(data);
+  const fetchOrgs = useCallback(async () => {
+    setLoadingOrgs(true);
+    const res = await listOrganizations();
+    setLoadingOrgs(false);
+    if (res.ok) {
+      setOrgsError("");
+      setOrganizations(res.data);
+    } else {
+      if (res.status === 401) {
+        setOrganizations([]);
+        setForcedAnonymous(true);
+        void reload();
       } else {
-        setSession(null);
+        setOrgsError(res.message);
       }
-    } catch {
-      setSession(null);
-    } finally {
-      setLoading(false);
     }
-  };
+  }, [reload]);
 
   useEffect(() => {
-    void refreshSession();
-  }, []);
-
-  const handleSignUp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setMessage("");
-    try {
-      const res = await fetch("/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          name: signUpName,
-          email: signUpEmail,
-          password: signUpPassword,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setMessage(`Sign up failed: ${data.message || res.statusText}`);
-      } else {
-        setMessage("Sign up successful!");
-        await refreshSession();
-      }
-    } catch (err) {
-      setMessage(`Sign up error: ${err instanceof Error ? err.message : String(err)}`);
+    if (status === "authenticated" && !forcedAnonymous) {
+      void fetchOrgs();
     }
-  };
-
-  const handleSignIn = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setMessage("");
-    try {
-      const res = await fetch("/api/auth/sign-in/email", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          email: signInEmail,
-          password: signInPassword,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setMessage(`Sign in failed: ${data.message || res.statusText}`);
-      } else {
-        setMessage("Sign in successful!");
-        await refreshSession();
-      }
-    } catch (err) {
-      setMessage(`Sign in error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  };
+  }, [status, forcedAnonymous, fetchOrgs]);
 
   const handleSignOut = async () => {
-    setMessage("");
-    try {
-      const res = await fetch("/api/auth/sign-out", {
-        method: "POST",
-        credentials: "include",
-      });
-      if (res.ok) {
-        setMessage("Signed out successfully");
-        setSession(null);
+    const res = await signOut();
+    if (res.ok) {
+      setOrganizations([]);
+      setForcedAnonymous(false);
+    } else {
+      setOrgsError(res.message);
+    }
+    await reload();
+  };
+
+  const handleCreateTeam = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const trimmed = newTeamName.trim();
+    if (!trimmed) return;
+
+    setCreateError("");
+    setCreateSubmitting(true);
+    const slug = generateTeamSlug();
+    const res = await createOrganization({ name: trimmed, slug });
+    setCreateSubmitting(false);
+
+    if (res.ok) {
+      setNewTeamName("");
+      await fetchOrgs();
+    } else {
+      if (res.status === 401) {
+        setOrganizations([]);
+        setForcedAnonymous(true);
+        void reload();
       } else {
-        setMessage("Sign out failed");
+        setCreateError(res.message);
       }
-    } catch (err) {
-      setMessage(`Sign out error: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
+  if (status === "loading") {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-4">
+        <p className="text-muted-foreground">加载中…</p>
+      </main>
+    );
+  }
+
+  if (status === "anonymous" || forcedAnonymous) {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>活动报名系统</CardTitle>
+            <CardDescription>登录或注册以继续使用系统</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {sessionError && (
+              <div
+                role="alert"
+                className="mb-4 rounded-md bg-destructive/15 p-3 text-sm text-destructive"
+              >
+                {sessionError}
+              </div>
+            )}
+            <AuthForm
+              onAuthenticated={() => {
+                setForcedAnonymous(false);
+                void reload();
+              }}
+            />
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
   return (
-    <main style={{ padding: "2rem", fontFamily: "sans-serif" }}>
-      <h1>Event Registration System</h1>
+    <main className="min-h-screen p-6 md:p-10">
+      <div className="mx-auto max-w-4xl space-y-8">
+        <header className="flex flex-col gap-4 border-b pb-6 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">活动报名系统</h1>
+            <p className="text-sm text-muted-foreground">
+              当前用户：<span className="font-medium text-foreground">{user?.name}</span>（
+              {user?.email}）
+            </p>
+          </div>
+          <Button variant="outline" onClick={handleSignOut}>
+            退出
+          </Button>
+        </header>
 
-      {message && (
-        <div
-          style={{ margin: "1rem 0", padding: "0.5rem", border: "1px solid #ccc" }}
-          data-testid="status-message"
-        >
-          {message}
-        </div>
-      )}
-
-      {loading ? (
-        <p>Loading session...</p>
-      ) : session ? (
-        <section data-testid="session-info">
-          <h2>Current Session</h2>
-          <p>
-            User: <strong>{session.user.name}</strong> ({session.user.email})
-          </p>
-          <p>User ID: {session.user.id}</p>
-          <button type="button" onClick={refreshSession} data-testid="refresh-session-button">
-            Refresh Session
-          </button>
-          <button
-            type="button"
-            onClick={handleSignOut}
-            data-testid="sign-out-button"
-            style={{ marginLeft: "1rem" }}
-          >
-            Sign Out
-          </button>
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold">我的团队</h2>
+          {orgsError && (
+            <div role="alert" className="rounded-md bg-destructive/15 p-3 text-sm text-destructive">
+              {orgsError}
+            </div>
+          )}
+          {loadingOrgs ? (
+            <p className="text-sm text-muted-foreground">正在加载团队列表…</p>
+          ) : orgsError ? null : organizations.length === 0 ? (
+            <p className="text-sm text-muted-foreground">还没有团队，先创建一个</p>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {organizations.map((org) => (
+                <Link
+                  key={org.id}
+                  href={`/orgs/${org.id}`}
+                  className="block rounded-lg border p-4 transition-colors hover:bg-muted/50"
+                >
+                  <div className="font-medium">{org.name}</div>
+                  <div className="text-xs text-muted-foreground">{org.slug}</div>
+                </Link>
+              ))}
+            </div>
+          )}
         </section>
-      ) : (
-        <div style={{ display: "flex", gap: "2rem", marginTop: "2rem" }}>
-          <section data-testid="sign-up-section">
-            <h2>Sign Up</h2>
-            <form onSubmit={handleSignUp}>
-              <div>
-                <label htmlFor="sign-up-name">Name: </label>
-                <input
-                  id="sign-up-name"
-                  data-testid="sign-up-name"
-                  value={signUpName}
-                  onChange={(e) => setSignUpName(e.target.value)}
-                  required
-                />
-              </div>
-              <div style={{ marginTop: "0.5rem" }}>
-                <label htmlFor="sign-up-email">Email: </label>
-                <input
-                  id="sign-up-email"
-                  type="email"
-                  data-testid="sign-up-email"
-                  value={signUpEmail}
-                  onChange={(e) => setSignUpEmail(e.target.value)}
-                  required
-                />
-              </div>
-              <div style={{ marginTop: "0.5rem" }}>
-                <label htmlFor="sign-up-password">Password: </label>
-                <input
-                  id="sign-up-password"
-                  type="password"
-                  data-testid="sign-up-password"
-                  value={signUpPassword}
-                  onChange={(e) => setSignUpPassword(e.target.value)}
-                  required
-                />
-              </div>
-              <button type="submit" data-testid="sign-up-submit" style={{ marginTop: "0.5rem" }}>
-                Sign Up
-              </button>
-            </form>
-          </section>
 
-          <section data-testid="sign-in-section">
-            <h2>Sign In</h2>
-            <form onSubmit={handleSignIn}>
-              <div>
-                <label htmlFor="sign-in-email">Email: </label>
-                <input
-                  id="sign-in-email"
-                  type="email"
-                  data-testid="sign-in-email"
-                  value={signInEmail}
-                  onChange={(e) => setSignInEmail(e.target.value)}
-                  required
-                />
-              </div>
-              <div style={{ marginTop: "0.5rem" }}>
-                <label htmlFor="sign-in-password">Password: </label>
-                <input
-                  id="sign-in-password"
-                  type="password"
-                  data-testid="sign-in-password"
-                  value={signInPassword}
-                  onChange={(e) => setSignInPassword(e.target.value)}
-                  required
-                />
-              </div>
-              <button type="submit" data-testid="sign-in-submit" style={{ marginTop: "0.5rem" }}>
-                Sign In
-              </button>
-            </form>
-          </section>
-        </div>
-      )}
+        <section>
+          <Card className="max-w-md">
+            <CardHeader>
+              <CardTitle>创建团队</CardTitle>
+              <CardDescription>输入团队名称，标识符将自动生成</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleCreateTeam} className="space-y-4">
+                {createError && (
+                  <div
+                    role="alert"
+                    className="rounded-md bg-destructive/15 p-3 text-sm text-destructive"
+                  >
+                    {createError}
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="team-name">团队名称</Label>
+                  <Input
+                    id="team-name"
+                    type="text"
+                    required
+                    placeholder="请输入团队名称"
+                    value={newTeamName}
+                    onChange={(e) => setNewTeamName(e.target.value)}
+                    disabled={createSubmitting}
+                  />
+                </div>
+                <Button type="submit" disabled={createSubmitting} className="w-full">
+                  {createSubmitting ? "创建中…" : "创建团队"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        </section>
+      </div>
     </main>
   );
 }
