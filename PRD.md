@@ -178,15 +178,15 @@
 | --- | --- | --- | --- |
 | GET | `/api/orgs/:orgId/members` | member+ | 成员列表（响应数组每项包含 `userId`、`name`、`role`，不含 `email`） |
 | POST | `/api/orgs/:orgId/members` | admin+ | 按邮箱直接添加已注册用户（BR-2 的退路；邀请走 Better Auth） |
-| GET | `/api/orgs/:orgId/events` | member+ | 活动列表，含确认数和候补数（确认数、候补数自 S3 起返回）；`limit` 默认 20 |
+| GET | `/api/orgs/:orgId/events` | member+ | 活动列表，含确认数和候补数（确认数、候补数自 S3 起返回）；`limit` 默认 20、最大 100，`offset` 默认 0 |
 | POST | `/api/orgs/:orgId/events` | admin+ | 创建活动 |
-| GET | `/api/orgs/:orgId/events/:eventId` | member+ | 详情，含我的报名状态 |
+| GET | `/api/orgs/:orgId/events/:eventId` | member+ | 详情。200 返回 `eventDetailResponseSchema`：`eventResponseSchema` 加 `confirmedCount`、`waitlistedCount`（有效报名计数，同活动列表）和 `myRegistration`（当前用户的有效报名 `{ id, status }`，`status` 为 `confirmed` 或 `waitlisted`；没有有效报名为 `null`）。活动不属于该团队 404 |
 | PATCH | `/api/orgs/:orgId/events/:eventId` | admin+ | 修改活动（含名额）。成功返回 200 及创建活动响应 DTO（复用 `apps/api/src/index.ts` 中的 `eventResponseSchema`，字段详见下文，不含 `confirmedCount`、`waitlistedCount`）。请求体只接受 `title`、`description`、`capacity`，至少一项，拒绝未知字段（`.strict()`）。开始时间与截止时间不可改。请求体含 `capacity` 字段即视为改名额（不比较新旧值），开始后含 `capacity` 一律 409 `EVENT_STARTED`，只改标题或说明允许；`description` 传 `null` 为清空，缺省为不变 |
 | POST | `/api/orgs/:orgId/events/:eventId/cancel` | admin+ | 取消活动（BR-10 保留）。成功返回 200 及创建活动响应 DTO（同上复用 `eventResponseSchema`，`status` 为 `cancelled`） |
 | POST | `/api/orgs/:orgId/events/:eventId/registrations` | member+ | 报名当前用户；首次创建报名返回 201，重复报名（返回已有报名，BR-9）返回 200；响应体都带报名 id 和状态（其余字段在 D3 契约定稿时写入本表） |
 | DELETE | `/api/orgs/:orgId/events/:eventId/registrations/me` | member+ | 取消自己的报名；成功取消返回 204；没有有效报名时也返回 204 且不改库（幂等），但活动已取消或已开始时先返回 409（见第 6 节） |
 | DELETE | `/api/orgs/:orgId/events/:eventId/registrations/:registrationId` | admin+ | 取消他人的报名；按 `registrationId + eventId + organizationId` 查找，查不到 404；成功取消或已取消均返回 204 |
-| GET | `/api/orgs/:orgId/events/:eventId/registrations` | admin+ | 报名名单 |
+| GET | `/api/orgs/:orgId/events/:eventId/registrations` | admin+ | 报名名单。200 返回数组，每项 `{ id, userId, name, status, createdAt }`；只含有效报名（`confirmed`、`waitlisted`），按 `seq` 升序；不含 `email`、`seq`、`organizationId`；不分页。活动不属于该团队 404 |
 
 错误格式统一为 `{ "error": { "code": "…", "message": "…" } }`。
 

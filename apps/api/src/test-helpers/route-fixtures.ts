@@ -46,6 +46,8 @@ export const routeFixtureBuilders: RouteFixtureMap = {
     },
   }),
   "POST /api/orgs/:orgId/events/:eventId/cancel": () => ({}),
+  "GET /api/orgs/:orgId/events/:eventId": () => ({}),
+  "GET /api/orgs/:orgId/events/:eventId/registrations": () => ({}),
 };
 
 export function getRouteFixture(route: RouteEntry, ctx: RouteFixtureContext): RouteFixtureResult {

@@ -69,3 +69,57 @@ export type P1DeleteRegistrationMe = Expect<
 export type P2DeleteRegistrationMe = Expect<
   Equal<DeleteRegistrationMeArg["param"]["eventId"], string>
 >;
+
+type GetEventDetail = (typeof apiClient)["api"]["orgs"][":orgId"]["events"][":eventId"]["$get"];
+type GetEventDetailArg = NonNullable<Parameters<GetEventDetail>[0]>;
+
+export type NotAnyGetEventDetail = Expect<IsAny<GetEventDetail> extends false ? true : false>;
+export type P1GetEventDetail = Expect<Equal<GetEventDetailArg["param"]["orgId"], string>>;
+export type P2GetEventDetail = Expect<Equal<GetEventDetailArg["param"]["eventId"], string>>;
+
+// @ts-expect-error eventId 必须是 string
+export const n7: GetEventDetailArg["param"] = { orgId: "test", eventId: 123 };
+
+type GetEventRegistrations =
+  (typeof apiClient)["api"]["orgs"][":orgId"]["events"][":eventId"]["registrations"]["$get"];
+type GetEventRegistrationsArg = NonNullable<Parameters<GetEventRegistrations>[0]>;
+
+export type NotAnyGetEventRegistrations = Expect<
+  IsAny<GetEventRegistrations> extends false ? true : false
+>;
+export type P1GetEventRegistrations = Expect<
+  Equal<GetEventRegistrationsArg["param"]["orgId"], string>
+>;
+export type P2GetEventRegistrations = Expect<
+  Equal<GetEventRegistrationsArg["param"]["eventId"], string>
+>;
+
+// @ts-expect-error eventId 必须是 string
+export const n8: GetEventRegistrationsArg["param"] = { orgId: "test", eventId: 123 };
+
+type DeleteRegistration =
+  (typeof apiClient)["api"]["orgs"][":orgId"]["events"][":eventId"]["registrations"][":registrationId"]["$delete"];
+type DeleteRegistrationArg = NonNullable<Parameters<DeleteRegistration>[0]>;
+
+export type NotAnyDeleteRegistration = Expect<
+  IsAny<DeleteRegistration> extends false ? true : false
+>;
+export type P1DeleteRegistration = Expect<Equal<DeleteRegistrationArg["param"]["orgId"], string>>;
+export type P2DeleteRegistration = Expect<Equal<DeleteRegistrationArg["param"]["eventId"], string>>;
+export type P3DeleteRegistration = Expect<
+  Equal<DeleteRegistrationArg["param"]["registrationId"], string>
+>;
+
+// @ts-expect-error registrationId 必须是 string
+export const n9: DeleteRegistrationArg["param"]["registrationId"] = 123;
+
+type PostCancelEvent =
+  (typeof apiClient)["api"]["orgs"][":orgId"]["events"][":eventId"]["cancel"]["$post"];
+type PostCancelEventArg = NonNullable<Parameters<PostCancelEvent>[0]>;
+
+export type NotAnyPostCancelEvent = Expect<IsAny<PostCancelEvent> extends false ? true : false>;
+export type P1PostCancelEvent = Expect<Equal<PostCancelEventArg["param"]["orgId"], string>>;
+export type P2PostCancelEvent = Expect<Equal<PostCancelEventArg["param"]["eventId"], string>>;
+
+// @ts-expect-error eventId 必须是 string
+export const n10: PostCancelEventArg["param"] = { orgId: "test", eventId: 123 };

@@ -5,6 +5,8 @@ import { auth, db } from "./auth.ts";
 import { errorResponseSchema, orgAuthMiddleware, requireRole } from "./auth-middleware.ts";
 import { parseEnv } from "./env.ts";
 import { cancel, cancelEvent, register, updateEvent } from "./registrations.ts";
+import { getEventDetail, getEventRegistrations } from "./event-reads.ts";
+import { DomainError } from "./domain-error.ts";
 import { respondWithError } from "./http-errors.ts";
 
 export const env = parseEnv(process.env);
@@ -40,6 +42,23 @@ export const registrationResponseSchema = z.object({
   eventId: z.string().uuid(),
   userId: z.string(),
   status: z.string(),
+  createdAt: z.string(),
+});
+
+export const eventDetailResponseSchema = eventListItemResponseSchema.extend({
+  myRegistration: z
+    .object({
+      id: z.string().uuid(),
+      status: z.enum(["confirmed", "waitlisted"]),
+    })
+    .nullable(),
+});
+
+export const eventRegistrationListItemSchema = z.object({
+  id: z.string().uuid(),
+  userId: z.string(),
+  name: z.string(),
+  status: z.enum(["confirmed", "waitlisted"]),
   createdAt: z.string(),
 });
 
@@ -608,6 +627,130 @@ const cancelEventRoute = createRoute({
   },
 });
 
+const getEventDetailRoute = createRoute({
+  method: "get",
+  path: "/api/orgs/{orgId}/events/{eventId}",
+  middleware: [requireRole("member")] as const,
+  request: {
+    params: z.object({
+      orgId: z.string(),
+      eventId: z.string().uuid("Invalid eventId format"),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Event detail with user registration",
+      content: {
+        "application/json": {
+          schema: eventDetailResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: "Validation error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    401: {
+      description: "Unauthenticated",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    403: {
+      description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Not Found",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal Server Error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+const getEventRegistrationsRoute = createRoute({
+  method: "get",
+  path: "/api/orgs/{orgId}/events/{eventId}/registrations",
+  middleware: [requireRole("admin")] as const,
+  request: {
+    params: z.object({
+      orgId: z.string(),
+      eventId: z.string().uuid("Invalid eventId format"),
+    }),
+  },
+  responses: {
+    200: {
+      description: "List of active event registrations",
+      content: {
+        "application/json": {
+          schema: z.array(eventRegistrationListItemSchema),
+        },
+      },
+    },
+    400: {
+      description: "Validation error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    401: {
+      description: "Unauthenticated",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    403: {
+      description: "Forbidden",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Not Found",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+    500: {
+      description: "Internal Server Error",
+      content: {
+        "application/json": {
+          schema: errorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
 const baseApp = new OpenAPIHono({
   defaultHook: (result, c) => {
     if (!result.success) {
@@ -849,6 +992,45 @@ export const app = baseApp
       );
     } catch (err) {
       return respondWithError(c, err, "Failed to cancel event");
+    }
+  })
+  .openapi(getEventDetailRoute, async (c) => {
+    const { orgId, eventId } = c.req.valid("param");
+    const sessionUser = c.get("user") as { id: string };
+
+    try {
+      const detail = await getEventDetail(db, orgId, eventId, sessionUser.id);
+      return c.json(detail, 200);
+    } catch (err) {
+      if (err instanceof DomainError && err.code === "NOT_FOUND") {
+        return c.json({ error: { code: "NOT_FOUND", message: err.message } }, 404);
+      }
+      return c.json(
+        { error: { code: "INTERNAL_ERROR", message: "Failed to fetch event detail" } },
+        500,
+      );
+    }
+  })
+  .openapi(getEventRegistrationsRoute, async (c) => {
+    const { orgId, eventId } = c.req.valid("param");
+    const sessionUser = c.get("user") as { id: string };
+
+    try {
+      const list = await getEventRegistrations(db, orgId, eventId, sessionUser.id);
+      return c.json(list, 200);
+    } catch (err) {
+      if (err instanceof DomainError && err.code === "NOT_FOUND") {
+        return c.json({ error: { code: "NOT_FOUND", message: err.message } }, 404);
+      }
+      return c.json(
+        {
+          error: {
+            code: "INTERNAL_ERROR",
+            message: "Failed to fetch event registrations",
+          },
+        },
+        500,
+      );
     }
   })
   .doc("/doc", {
