@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { serve } from "@hono/node-server";
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { asc, eq, events, member, sql, user } from "@event-system/db";
@@ -8,8 +9,10 @@ import { cancel, cancelEvent, register, updateEvent } from "./registrations.ts";
 import { getEventDetail, getEventRegistrations } from "./event-reads.ts";
 import { DomainError } from "./domain-error.ts";
 import { respondWithError } from "./http-errors.ts";
+import { logger, requestLoggerMiddleware, setLogLevel, summarizeError } from "./logger.ts";
 
 export const env = parseEnv(process.env);
+setLogLevel(env.LOG_LEVEL);
 
 export class DomainValidationError extends Error {
   constructor(message: string) {
@@ -767,7 +770,28 @@ const baseApp = new OpenAPIHono({
   },
 });
 
-baseApp.onError((_err, c) => {
+baseApp.use("*", requestLoggerMiddleware);
+
+baseApp.onError((err, c) => {
+  let requestId = (c.get as (key: string) => unknown)("requestId") as string | undefined;
+  if (!requestId) {
+    requestId = crypto.randomUUID();
+    (c.set as (key: string, val: unknown) => void)("requestId", requestId);
+  }
+  const method = c.req.method;
+  const path = c.req.path;
+
+  const errorFields = summarizeError(err);
+
+  const fields: Record<string, unknown> = {
+    requestId,
+    method,
+    path,
+    ...errorFields,
+  };
+
+  logger.error("Internal server error", fields);
+
   return c.json(
     {
       error: {

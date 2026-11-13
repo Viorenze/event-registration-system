@@ -1,4 +1,4 @@
-import { defineConfig } from "vite-plus";
+import { configDefaults, defineConfig } from "vite-plus";
 
 export default defineConfig({
   fmt: {
@@ -26,11 +26,11 @@ export default defineConfig({
   },
   test: {
     exclude: [
-      "**/node_modules/**",
-      "**/dist/**",
+      ...configDefaults.exclude,
       "**/.next/**",
       "**/*.integration.test.ts",
       "**/*.concurrency.test.ts",
+      "e2e/**",
     ],
   },
 });

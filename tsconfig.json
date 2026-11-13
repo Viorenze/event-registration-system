@@ -5,6 +5,8 @@
   },
   "include": [
     "vite.config.ts",
+    "playwright.config.ts",
+    "e2e",
     "apps/api/src/**/*.ts",
     "apps/web/src/**/*.ts",
     "apps/web/src/**/*.tsx",

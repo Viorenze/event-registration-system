@@ -9,9 +9,12 @@
     "test:integration": "vp test -c vite.integration.config.ts --run",
     "test:concurrency": "vp test -c vite.concurrency.config.ts --run",
     "build:web": "pnpm --filter @event-system/web build",
-    "gate": "vp check && vp test && pnpm test:integration && pnpm test:concurrency && pnpm --filter @event-system/db verify:migration && pnpm --filter @event-system/web build"
+    "e2e": "node e2e/preflight.mjs && playwright test",
+    "gate": "vp check && vp test && pnpm test:integration && pnpm test:concurrency && pnpm --filter @event-system/db verify:migration && pnpm --filter @event-system/web build && pnpm e2e"
   },
   "devDependencies": {
+    "@event-system/db": "workspace:*",
+    "@playwright/test": "1.65.0",
     "typescript": "^7.0.2",
     "vite-plus": "^1.3.0"
   },
