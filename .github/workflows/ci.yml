@@ -286,8 +286,17 @@ jobs:
           printf "TRUSTED_ORIGINS=http://localhost:3000\n" >> .env
           printf "LOG_LEVEL=info\n" >> .env
 
+      - name: Build API image (web image builds FROM it)
+        run: docker build -f apps/api/Dockerfile -t event-system-api:latest .
+
       - name: Start Docker stack
-        run: docker compose up -d --build
+        run: |
+          set -uo pipefail
+          if ! docker compose --progress=plain up -d --build > /tmp/compose-up.log 2>&1; then
+            tail -n 25 /tmp/compose-up.log | tr '\r\n' '  ' | cut -c1-3000 > /tmp/compose-up-tail.txt
+            echo "::error title=docker compose up failed::$(cat /tmp/compose-up-tail.txt)"
+            exit 1
+          fi
 
       - name: Wait for services to be ready
         run: |
