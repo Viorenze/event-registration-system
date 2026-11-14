@@ -3,6 +3,7 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { organization } from "better-auth/plugins";
 import { parseEnv, parseTrustedOrigins } from "./env.ts";
+import { forwardBetterAuthLog } from "./logger.ts";
 
 const env = parseEnv(process.env);
 const trustedOrigins = parseTrustedOrigins(env.TRUSTED_ORIGINS);
@@ -22,6 +23,12 @@ export const auth = betterAuth({
   secret: env.BETTER_AUTH_SECRET,
   baseURL: env.BETTER_AUTH_URL,
   trustedOrigins,
+  logger: {
+    log: forwardBetterAuthLog,
+  },
+  onAPIError: {
+    throw: true,
+  },
   emailAndPassword: {
     enabled: true,
   },

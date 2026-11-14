@@ -331,8 +331,10 @@ describe("S2 Events Integration & Isolation Tests (A1, I1, I4, H-Reach, L5)", ()
     });
 
     it("creates an event successfully when startsAt and registrationDeadline use non-UTC timezone offsets", async () => {
-      const startsAtWithOffset = "2026-11-10T18:00:00+09:00";
-      const deadlineWithOffset = "2026-11-10T04:00:00-05:00";
+      const futureDate = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+      const startsAtWithOffset = `${futureDate}T18:00:00+09:00`;
+      const deadlineWithOffset = `${futureDate}T04:00:00-05:00`;
+      const expectedUtcIso = `${futureDate}T09:00:00.000Z`;
 
       const payload = {
         title: "Timezone Offset Event",
@@ -352,10 +354,8 @@ describe("S2 Events Integration & Isolation Tests (A1, I1, I4, H-Reach, L5)", ()
 
       expect(res.status).toBe(201);
       const data = (await res.json()) as Record<string, unknown>;
-      expect(new Date(data.startsAt as string).toISOString()).toBe("2026-11-10T09:00:00.000Z");
-      expect(new Date(data.registrationDeadline as string).toISOString()).toBe(
-        "2026-11-10T09:00:00.000Z",
-      );
+      expect(new Date(data.startsAt as string).toISOString()).toBe(expectedUtcIso);
+      expect(new Date(data.registrationDeadline as string).toISOString()).toBe(expectedUtcIso);
     });
 
     it("rejects event creation when registrationDeadline is strictly 1 millisecond after startsAt (BR-3 strict millisecond boundary)", async () => {

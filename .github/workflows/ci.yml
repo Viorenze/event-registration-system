@@ -239,3 +239,116 @@ jobs:
 
       - name: Build Web Docker image
         run: docker build -f apps/web/Dockerfile -t event-system-web:latest --build-arg API_INTERNAL_URL=http://api:3001 .
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.14.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Add local node_modules/.bin to GITHUB_PATH
+        run: echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: 准备临时环境（密钥掩码）
+        run: |
+          set -euo pipefail
+          POSTGRES_PASSWORD=$(openssl rand -hex 16)
+          BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+          DATABASE_URL="postgresql://postgres:${POSTGRES_PASSWORD}@127.0.0.1:5433/event_registration"
+          echo "::add-mask::${POSTGRES_PASSWORD}"
+          echo "::add-mask::${BETTER_AUTH_SECRET}"
+          echo "::add-mask::${DATABASE_URL}"
+          printf "POSTGRES_PASSWORD=%s\n" "${POSTGRES_PASSWORD}" >> "$GITHUB_ENV"
+          printf "BETTER_AUTH_SECRET=%s\n" "${BETTER_AUTH_SECRET}" >> "$GITHUB_ENV"
+          printf "DATABASE_URL=%s\n" "${DATABASE_URL}" >> "$GITHUB_ENV"
+          printf "POSTGRES_USER=postgres\n" > .env
+          printf "POSTGRES_PASSWORD=%s\n" "${POSTGRES_PASSWORD}" >> .env
+          printf "POSTGRES_DB=event_registration\n" >> .env
+          printf "POSTGRES_PORT=5433\n" >> .env
+          printf "BETTER_AUTH_SECRET=%s\n" "${BETTER_AUTH_SECRET}" >> .env
+          printf "BETTER_AUTH_URL=http://localhost:3000\n" >> .env
+          printf "TRUSTED_ORIGINS=http://localhost:3000\n" >> .env
+          printf "LOG_LEVEL=info\n" >> .env
+
+      - name: Build API image (web image builds FROM it)
+        run: docker build -f apps/api/Dockerfile -t event-system-api:latest .
+
+      - name: Start Docker stack
+        run: |
+          set -uo pipefail
+          if ! docker compose --progress=plain up -d --build > /tmp/compose-up.log 2>&1; then
+            tail -n 25 /tmp/compose-up.log | tr '\r\n' '  ' | cut -c1-3000 > /tmp/compose-up-tail.txt
+            echo "::error title=docker compose up failed::$(cat /tmp/compose-up-tail.txt)"
+            exit 1
+          fi
+
+      - name: Wait for services to be ready
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if timeout 10 node e2e/preflight.mjs; then
+              echo "Services are ready (attempt $i)."
+              exit 0
+            fi
+            echo "Waiting for services... (attempt $i/60)"
+            sleep 2
+          done
+          echo "Services failed to become ready within 120 seconds."
+          exit 1
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+        run: pnpm e2e
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          docker compose ps -a
+          docker compose logs --no-color > /tmp/compose.log
+          count_e2e_pw=$(grep -c "E2e-Pw-" /tmp/compose.log || true)
+          count_session_token=$(grep -c "session_token" /tmp/compose.log || true)
+          count_set_cookie=$(grep -c "set-cookie" /tmp/compose.log || true)
+          count_example_com=$(grep -c "@example.com" /tmp/compose.log || true)
+          count_invite=$(grep -c "invite#" /tmp/compose.log || true)
+          count_secret=0
+          if [ -n "${BETTER_AUTH_SECRET:-}" ]; then
+            count_secret=$(grep -cF "$BETTER_AUTH_SECRET" /tmp/compose.log || true)
+          fi
+          count_pw=0
+          if [ -n "${POSTGRES_PASSWORD:-}" ]; then
+            count_pw=$(grep -cF "$POSTGRES_PASSWORD" /tmp/compose.log || true)
+          fi
+          total=$((count_e2e_pw + count_session_token + count_set_cookie + count_example_com + count_invite + count_secret + count_pw))
+          if [ "$total" -eq 0 ]; then
+            cat /tmp/compose.log
+          else
+            echo "E2e-Pw-: $count_e2e_pw"
+            echo "session_token: $count_session_token"
+            echo "set-cookie: $count_set_cookie"
+            echo "@example.com: $count_example_com"
+            echo "invite#: $count_invite"
+            echo "BETTER_AUTH_SECRET: $count_secret"
+            echo "POSTGRES_PASSWORD: $count_pw"
+            echo "日志已因疑似泄露而不输出"
+          fi

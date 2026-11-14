@@ -747,3 +747,207 @@
     - 成员页 `GET members` 请求出现两次（useOrgRole 与列表）。
 - 验证：
   - 本地 pnpm gate 在 S5 实现终点全绿（单元 9、集成 187、并发 19、迁移校验通过、next build 路由 6 条）；docker-build 与重复 5 次的并发 job 只在 CI 运行，本条写入时尚未运行。
+
+## 2026-11-10 S6 结构化日志与错误日志（DEV-S6-01）
+
+- 选择：
+  - 新增 `apps/api/src/logger.ts`：级别过滤、单行 JSON、可注入 sink。请求日志中间件挂在最外层；`requestId` 由服务端 `randomUUID` 生成，忽略客户端传来的同名头；响应头带 `X-Request-Id`；字段为 requestId、method、path（不含查询串）、status、durationMs、userId、orgId；`/doc` 用 debug 级；另有 `summarizeError` 与 `forwardBetterAuthLog`。
+  - `apps/api/src/index.ts` 的 `onError` 返回与原先相同的 500 体（`{ error: { code: "INTERNAL_ERROR", message: "Internal server error" } }`），并输出净化后的 error 日志，不含 `err.message`。
+  - `apps/api/src/auth.ts` 增加 `logger: { log: forwardBetterAuthLog }` 与 `onAPIError: { throw: true }`（作者已批准）。
+  - D-1：不接第三方错误监控，只用上述结构化请求日志与错误日志；输出到 stdout，没有聚合、告警与留存策略。不以"Sentry 国内连通性"为理由（没有官方依据）。
+- 原因：
+  - Better Auth 默认日志会把 `DrizzleQueryError` 的 query 与 params 打到 console.error，会话查询的 params 就是令牌。用哨兵值复现的输出里有 `select * from session where token = $1` 与哨兵参数（`s6-1b-raw.txt:27,29`）。
+  - better-call 的 `# SERVER_ERROR:` 行不受 `logger` 选项影响，只有 `onAPIError.throw` 能绕过（`s6-1b-raw.txt:29`）。
+- 备选：`logger.disabled`（代理最初提议，作者否决）。
+- 验证：
+  - 测试在 `apps/api/src/logging.integration.test.ts`，2026-11-09 的 verbose 运行里该文件 8 个用例全部 ✓（逐条用例名见 DEV-S6-08 的矩阵）。其中 L4（第 237 行）、L8（第 388 行）、L9（第 474 行）对 `POST /api/auth/sign-in/email` 注入非 APIError 异常，断言返回 500 与统一的 `INTERNAL_ERROR` 体；L9（第 474–604 行）还断言日志与 stdout/stderr 中没有 SQL 文本、参数、令牌哨兵值（来源：S6-3b-2 的代码阅读）。
+  - 变异实验 M1–M12：S6-1 阶段回报称均按预期变红并已还原；本轮只核对了 M11、M12 的原文（`s6-1d-raw.txt:29-41`）。M11（去掉 `onAPIError.throw`）红在 `logging.integration.test.ts:575` 的响应体断言（实得空串），没有跑到泄露检查，所以 M11 本身不证明泄露；M12（去掉 `logger` 配置）红在第 547 行，输出里看到泄露行（SQL 文本与哨兵参数）。M1–M10 的逐项结果本轮没有重新核对。
+
+## 2026-11-10 S6 Playwright e2e 设计与证据口径（DEV-S6-02）
+
+- 选择：
+  - 依赖：根 devDependencies 新增 `@playwright/test@1.65.0`（精确版本）与 `@event-system/db@workspace:*`（e2e 通过它查库，不新增 `pg`）。锁文件 packages 段只新增 `@playwright/test`、`playwright`、`playwright-core` 三项（`s6-2a-raw.txt:331,343,348`）；另有 peer 变体被重新解析（S6-2a 回报），不是新增包。
+  - 配置 `playwright.config.ts`（第 1–19 行）：testDir `./e2e`，workers 1，fullyParallel false，retries 0，reporter list，baseURL 取 `E2E_BASE_URL ?? "http://localhost:3000"`，trace off，只有 chromium 一个 project，没有 webServer。
+  - `e2e/preflight.mjs`：请求 `${baseURL}/api/auth/get-session`，HTTP 200 且 body 为 null 才退出 0；`package.json` 里 `e2e` 为 `node e2e/preflight.mjs && playwright test`，`gate` 以 `pnpm e2e` 结尾（`package.json:13`）；预检失败不自动启动 Docker。
+  - e2e 纳入 `vp check` 类型检查，Vitest 排除 `e2e/**`（S6-2a 回报，本轮未复核配置）。
+  - 夹具 `e2e/fixtures.ts`：覆盖 context，给每个浏览器上下文一个唯一的 `x-forwarded-for`（203.0.113.N 单值）；`newUserContext(browser, testInfo)` 给同一测试里的第二个用户开独立上下文。测试用户邮箱为 `e2e-<12 位十六进制>@example.com`，密码为 `E2e-Pw-<12 位十六进制>`（`e2e/helpers.ts:10-17`）。
+  - 不改 apps/web，不加 data-testid；"已确认"与页面其他文字撞字，用"我的状态："容器限定加 `exact: true`。
+  - E0：注册 → 查库 session=1 → 退出（waitForResponse 断言 POST、URL 含 `/api/auth/sign-out`、状态 200）→ 无错误提示 → 查库 session=0 → 刷新仍未登录 → 再登录 → 查库 session=1。
+  - E1：注册 → 创建团队 → 创建活动 → 报名成功（显示已确认），并查库确认。
+  - E2：A 建团队、名额 1 的活动并报名 → A 在成员页邀请 B → B 在独立上下文打开邀请链接、注册、接受，URL 不再含 "#" → B 报名显示"候补中" → A 接受 confirm 取消 → B 刷新显示"已确认" → 查库 A cancelled、B confirmed、该活动 confirmed 数为 1。邀请链接只存在于测试变量里，不进断言信息；goto 包 try/catch，失败时只抛固定文案。
+  - E3：A 建组织与活动，A 自己的团队页可见该活动标题（正向对照）；B 另建组织，B 的团队页先等"暂无活动"可见，再断言 A 的标题 count 为 0；B 打开 A 的团队页与活动详情页，精确断言"访问受限"与"你不是该团队成员，或无权访问该团队"；查库 B 对 A 的活动没有报名行、A 的活动行与快照逐字段相同、A 的团队下 B 没有 member 行。
+  - 例外：针对已存在功能的 e2e 不适用 AGENTS 规则 5 的"先因功能缺失而失败"。作者在 S6 计划阶段于对话中批准以"断言级红对照 + 行为级变异"替代（无文件记录，日期未记录）。
+- 原因：E0 对应 S5 手工发现的 sign-out 缺陷（缺 Content-Type 返回 415，见 DEV-S5-05），该缺陷 `vp check` 与 `next build` 都发现不了。
+- 验证：
+  - 2026-11-09 完整 `pnpm gate` 中 e2e 4 passed，4 个用例名与结果见 `s63b0-gate.txt:507-512`。
+  - S6-2b-1、S6-2b-2 回报称本地连续 5 次、30 次 sign-up 的 10 秒窗口最多 8 次、429 为 0；本轮未复核该原始记录。
+  - 上述结果都是本地 Docker Compose 栈上的结果；CI 的 e2e job 尚未在 GitHub 上运行（见 DEV-S6-05）。
+
+## 2026-11-10 S6 限流发现与夹具（DEV-S6-03）
+
+- 选择：e2e 夹具给每个浏览器上下文设置唯一的 `x-forwarded-for` 来避开限流；`apps/api/src/auth.ts` 不改（改它需作者另行批准）。
+- 事实与证据：
+  - Compose 里 api 的 `NODE_ENV` 为 production（`docker-compose.yml:55`）；Better Auth 的 `rateLimit.enabled` 默认取 `isProduction`、window 10、max 100、storage 默认 memory（`better-auth/dist/context/create-context.mjs:170-176`）；`/sign-in`、`/sign-up` 的特殊规则为 10 秒内最多 3 次（`dist/api/rate-limiter/index.mjs:305-312`）；`auth.ts` 里没有配置 `rateLimit` 或 `trustedProxies`（Select-String 无命中）。
+  - 客户端 IP 取自 `x-forwarded-for`：没有 `trustedProxies` 时只信恰好一个值，多值、无效值或缺失时返回 null；仅 test 与 development 回退到 127.0.0.1（`@better-auth/core/dist/utils/ip.mjs:190,192,203-219`）。2026-11-11 作者自己读到：第 190 行 `forwardedIps.length !== 1` 返回 null，第 192 行无效值返回 null，第 212 行 `trustedProxies` 取自 `options.advanced.ipAddress.trustedProxies`（选项路径是 `advanced.ipAddress`，不是顶层），第 217 行 test/development 回退到 127.0.0.1；"没有 trustedProxies 时才走恰好一个值的分支"这一点所在的第 185–189 行没有读到，第 218–219 行也没读，未印证。
+  - 探针实测（经 localhost:3000，`s6-2a-close-raw.txt:30-51`）：A 不带 `x-forwarded-for` 连发 5 次，前 3 次 200，第 4、5 次 429；B 用 5 个不同的 `x-forwarded-for`，全部 200；C 用同一个 `x-forwarded-for`，第 4 次 429。
+  - MC-3 去掉夹具里的头后出现 1 次 429（`s6-2c1-raw.txt:176,259`），E2 红在 `e2e/e2.spec.ts:124`。
+- 推断（不是验证）：
+  - Next 经 `base-server.js` 用 `??=` 保留客户端自带的 `x-forwarded-for`，并且代理请求没有传 `xfwd`（S6-2a 回报，本轮未复核）。
+  - 限流存储是进程内存，多副本部署时不共享：来自上述 storage 默认值的代码阅读，没有实验。
+- 已知限制：限流可被伪造 `x-forwarded-for` 绕过（探针 B 为证据）；生产需由反向代理统一重写该头。HTTPS 与真实域名下未验证。
+
+## 2026-11-10 S6-2c-1 断言级控制与行为级变异实验（DEV-S6-04）
+
+- 方法：每个实验先备份到 `%TEMP%\s6-2c1-orig\` 并计算 SHA-256；用 Edit 修改；记录 `git diff` 与 numstat；运行 `pnpm e2e`；失败后立即扫描 `test-results`；把备份复制回去并比对 SHA-256；改了应用代码的实验重建对应服务并确认 4 passed。不用 `git restore`。docker 重建 api 共 4 次、web 共 2 次。
+- 结果（原始记录 `s6-2c1-raw.txt`；ME-2 的红在第 401、414–415 行，计数在第 426–436 行，ME-1 在第 440–500 行，ME-3'' 在第 282–360 行（原始记录里该实验的标题写作 ME-3），MC-1 在第 48–105 行，MC-2 在第 107–170 行，MC-3 在第 172–262 行（172–180 为提前出现的 429 日志分析，运行标题在第 182 行），以上行号范围均为从各节标题行到下一节分隔线之前一行）：
+  - MC-1（`e2e/e2.spec.ts`，邀请片段断言 `toBe(false)` 改为 `toBe(true)`）：只有 E2 红，红在 `e2e/e2.spec.ts:128:58`。
+  - MC-2（`e2e/e3.spec.ts`，`toHaveCount(0)` 改为 `toHaveCount(1)`）：只有 E3 红，红在 `e2e/e3.spec.ts:91:50`。
+  - MC-3（`e2e/fixtures.ts` 去掉两处 `x-forwarded-for`）：1 次 429，E2 红在 `e2e/e2.spec.ts:124:31`，其余 3 个通过。429 与 E2 失败的因果关系靠时间窗口推断。
+  - ME-3''（`apps/api/src/index.ts` 活动列表查询删除 `.where(eq(events.organizationId, orgId))`，并把 `asc(events.startsAt)` 排序改为 `desc(events.startsAt)`，需重建 api）：只有 E3 红，红在 `e2e/e3.spec.ts:90:45`（"暂无活动"可见）。排序一并翻转的原因：开发库有 100 多个旧活动，单独去掉过滤会让 A 自己的团队页第一页被旧活动占满，E1、E2、E3 先红在 A 一侧，分辨不出泄露。
+  - ME-2（`apps/api/src/registrations.ts:196` 的 `targetReg.status === "confirmed"` 改为 `"never_promoted"`，即取消报名时跳过递补，需重建 api）：只有 E2 红，红在 `e2e/e2.spec.ts:193:73`，库断言没有走到。该实验在开发库留下一个"有候补但确认数小于名额"的活动行，不删除不修复。
+  - ME-1（`apps/web/src/lib/auth-client.ts` 的 `signOut` 去掉 `Content-Type` 头与 `"{}"` 体，重现 S5 的 415 缺陷，需重建 web）：只有 E0 红，`Test timeout of 30000ms exceeded`，红在 `e2e/e0.spec.ts:50:12` 的 waitForResponse；同一时刻 api 日志有 `POST /api/auth/sign-out` 的 415（2026-11-08T16:54:59.364Z）。
+  - 每次失败后扫描 `invite#[A-Za-z0-9_-]{8,}` 命中 0，`test-results` 下各有 2 个文件。
+- 数据库计数（events 总数 | 有候补但确认数小于名额 | 确认数大于名额）：B0 = 108 | 0 | 0（实验前，`s6-2c1-raw.txt:27-31`）；B1 = 128 | 1 | 0（ME-2 之后，第 431–436 行）；B2 = 140 | 1 | 0（最终 gate 之后，第 551–555 行）。每次完整通过的 e2e 运行新建 3 个活动（来自测试流程阅读）。B1 到 B2 的 +12 是 3 的倍数，B0 到 B1 的 +20 不是；两个增量都没有按运行逐次对账，本记录不声称与运行次数吻合。
+- 还原核对：6 个被改文件改前、还原后的 SHA-256 在当时回报里逐字一致；该哈希没有留在 `s6-2c1-raw.txt` 里。2026-11-10 独立核对：仓库当前 6 个文件的 SHA-256 与备份目录文件、与下列记录值逐位相等：
+  - `e2e/e2.spec.ts`：`0ce8bc2de08270b01104ba4f8570c3e23351a8af5e05974ddbade2e818099024`
+  - `e2e/e3.spec.ts`：`237e7af1318e885a6c59cb1044119531d204f38f641cb3575672e9dcd76b159f`
+  - `e2e/fixtures.ts`：`807ca53e42fd00191fc8287cb6a28e5bcdb8409015d851f87e35fd91a84429ca`
+  - `apps/api/src/index.ts`：`ea400ca547efbc87783821308046480c6c8e137b3f7e84d8870cec94877d237d`
+  - `apps/api/src/registrations.ts`：`58e8d68458eecda5d8e6bfb83e9c49df707048f8bbcb78812d20747f724b7fac`
+  - `apps/web/src/lib/auth-client.ts`：`692cce8f2cf25858c0fee66f4a48b88b6850c928a877a1fc0130de946308913f`
+- 更早的断言级红对照：E0 在 S6-2b-1 的 V3 里做过（`s6-2b1-raw.txt:1944-1946`）。S6-2b-1 提交后又 amend 过，期间改动了 e2e 的 e2、e3、fixtures，所以 E2、E3 当时的红对照不能算数，由本条的 MC-1、MC-2 在现行代码上补做；E0 的文件没有被 amend 改动。
+- 范围说明：这些实验证明的是"现行 e2e 对这六类改动会变红"，不证明 e2e 之外的覆盖。
+
+## 2026-11-10 CI 的 e2e job 与对已批准计划 D-2 的偏差（DEV-S6-05）
+
+- 选择：在 `.github/workflows/ci.yml` 新增 job `e2e`（`name: e2e`，第 243–345 行；其余 5 个 job 一字未动）。触发条件仍是 `pull_request` 与 `push` 到 main（第 3–6 行），所以 e2e 在 main 上也会运行。
+  - 临时环境：`openssl rand -hex` 生成数据库密码与 `BETTER_AUTH_SECRET`；生成后立即 `::add-mask::`（含拼出的 `DATABASE_URL`）；写入仓库根目录的临时 `.env`（不提交；`.env` 里没有 `DATABASE_URL`）与 `$GITHUB_ENV`。`POSTGRES_PORT` 为 5433。
+  - e2e 进程需要的 `DATABASE_URL` 指向宿主机映射端口（`postgresql://…@127.0.0.1:5433/event_registration`），只通过 `pnpm e2e` 那一步的 `env:` 提供；容器内的 api 与 migrate 在 compose 里自己拼内部地址，不读取它。
+  - 起栈：`docker compose up -d --build`，随后最多 60 次、间隔 2 秒轮询 `timeout 10 node e2e/preflight.mjs`。
+  - 只安装 chromium：`pnpm exec playwright install --with-deps chromium`。
+  - 失败诊断步骤：先对 `docker compose logs` 做泄露计数（`E2e-Pw-`、`session_token`、`set-cookie`、`@example.com`、`invite#`，以及本 job 生成的密钥与数据库密码的字面值），全部为 0 才打印日志；任何一项大于 0 只打印计数与"日志已因疑似泄露而不输出"。
+  - 不上传 artifact、不开 trace/screenshot/video（`playwright.config.ts` 为 trace off；e2e job 内没有 upload-artifact，`s63a2-raw.txt`）；不写 `docker compose down`。
+- 与 D-2 的偏差：D-2 写的是 `docker compose up --build --wait`。这里改成 `up -d --build` 加轮询。原因：`--wait` 对一次性 migrate 服务（退出码 0）的行为没有核实，无法在本地验证；api 依赖 migrate 的 `service_completed_successfully`，web 依赖 api 的健康检查，`up -d` 会按 depends_on 的条件顺序启动 web 容器，但不保证 web 已就绪，就绪由随后的轮询判断。这是代码阅读得出的理由，没有实验。
+- 验证与限制：本地验证只有 YAML 解析（`yaml@2.9.1`，6 个 job、e2e 的 11 个 step）、编码检查（无 BOM、无 CR、末尾 0x0A）、违禁串扫描为 0、numstat 为 104 增 0 删；该 job 没有在 GitHub 上运行过。e2e 失败是否会阻断合并，还没有任何证据。S6-4 要读回分支保护的必需检查并补齐（DEV-S2 的 8b 只记了 ci、integration-tests、empty-db-migration、docker-build 四项，concurrency-tests 是否在列表里没有记录）。
+
+## 2026-11-10 对已有记录的更正与确认（DEV-S6-06）
+
+- I7(b)：D2 记为"部分验证"（当时没有 events 表）。现已可以关闭：`apps/api/src/team-management-i7.integration.test.ts` 的 I7(b) 用例创建活动（断言 201），并断言删除被拒后 `postSnap.events` 与 `preSnap.events` 相等（第 117–203 行）；另有 `team-management-i7.integration.test.ts:210` 的 L5 用例（以及 `events.integration.test.ts` 的 L5 套件里的 organization 删除用例）断言对有活动的 organization 直接 SQL DELETE 被外键拒绝（`logging.integration.test.ts:324` 的 L5 是 X-Request-Id 用例，与此无关），`registrations.integration.test.ts` 的 "I7(b) Regression" 用例在有活动与报名时断言行数不变。2026-11-09 的 verbose 运行中这三个用例均 ✓。
+- PRD：第 12 节"错误监控工具"一行改为"已定：不接第三方，用 Hono 结构化请求与错误日志（作者，2026-11-07）"（提交 fd42660，`PRD.md:390`）。第 11 节"错误监控：最小接入，D6 选定工具并记入 DECISIONS.md"一行未改（`PRD.md:377`），以第 12 节与 DEV-S6-01 为准。
+- PRD 第 7 节活动列表的 `limit` 默认 20、最大 100，`offset` 默认 0：与 `apps/api/src/index.ts:200-212` 的校验一致，PRD 未改。
+- 错误码命名：API 实际返回的是 `VALIDATION`、`UNAUTHENTICATED`、`FORBIDDEN`、`NOT_FOUND`（`auth-middleware.ts:32,72`、`http-errors.ts:19,36`）。`BAD_REQUEST`、`VALIDATION_ERROR`、`UNAUTHORIZED` 在源码与测试里命中 0（2026-11-10 搜索）。
+
+## 2026-11-10 S6 未验证项与已知限制（DEV-S6-07）
+
+日志：
+1. Better Auth 在 fallback join 的 catch 里无条件调用 `console.error(error)`，无法通过配置抑制（`@better-auth/core/dist/db/adapter/factory.mjs:387-394`，代码阅读）。`drizzle-orm` 的 `DrizzleQueryError` 带 `query` 与 `params`（`drizzle-orm/errors.js:12-23`）。该查询的参数是主表外键值（session 关联 user 的情形下是 userId）加 limit，同样是代码阅读；"会话读取实际走这条 join"没有验证，也没有运行时实验。测试里搜索 fallback、join 无命中；L9 注入的是外层 `db.select` 异常，走不到这个分支。
+2. Better Auth 的 logger 调用点扫描是 grep 式的，不是穷尽证明（`s6-1d-raw.txt:21-25`）。`baMessage` 的正则 `^[A-Za-z0-9_ .:-]{1,120}$`（`logger.ts:118`）挡得住邮箱与 URL，挡不住由字母数字组成的令牌；扫描没发现这类调用。
+3. `onAPIError.throw` 的影响：非 API 错误走统一的 500 JSON 体（L4、L8、L9 覆盖 `/api/auth/sign-in/email`，M11 为证）。Better Auth 的 4xx 没变的依据是间接的：I6、I7 仍通过，它们只覆盖邀请与团队管理两组端点，没有对其他 `/api/auth/*` 的 4xx 做直接测试。
+4. `/api/auth/*` 的请求日志 `userId`、`orgId` 为 null（`s63b0-api-log-before.txt:2` 的 get-session 行）；响应头不可变时的兜底分支（`logger.ts:78-90`）在测试里没有找到覆盖；message 很短时 `replaceAll` 会把栈帧文本打乱，无泄露（S6-1 回报，本轮未复核）；`index.ts` 的 `onError` 里有类型断言（`index.ts:775-779`）；现有集成测试输出现在带请求日志。
+5. 无日志聚合与告警（D-1）。
+6. 不含 requestId 的日志行：每个 api 进程各有一行 `{"baMessage":"withheld","level":"warn","msg":"better-auth"}`，出现在第一个 `/api/auth/*` 请求内部，约比该请求的日志行早 10 毫秒。重建前：api 日志第 1 行（2026-11-08T16:54:46.531Z）与第 2 行的 get-session 请求（`s63b0-api-log-before.txt:1-2`）；重建后：合并日志第 29 行与第 31 行（2026-11-09T13:35:05.664Z 与 .674Z，`s63b0-compose-log-after.txt:29,31`）。消息内容不符合 `baMessage` 的正则被挡成 withheld，具体内容未知。已知：`dist/auth/base.mjs` 第 8–9 行显示 `createBetterAuth` 一被调用就执行 `initFn(options).then(…)`，即异步启动上下文初始化（`betterAuth()` 是否一调用就走到 `createBetterAuth`，调用处没有读），初始化类警告（`create-context.mjs:44,45,65,154`）按时间应出现在进程启动附近，与第一个请求内部的时间点不吻合；本地 `BETTER_AUTH_SECRET` 长度 64，不触发第 44 行的长度警告；第 45 行的低熵警告（`estimateEntropy(secret) < 120`）没有排除，没有检验该密钥的熵估计。候选（未验证）：`rate-limiter/index.mjs:244-247` 的"无法确定客户端 IP"警告，它由模块级变量 `ipWarningLogged`（第 235 行）保证每个进程只发一次；该警告的原文（`rate-limiter/index.mjs:245`），经作者 2026-11-11 自己运行的命令测得：消息长 276 个字符，含 1 个逗号、4 个反引号，用 `^[A-Za-z0-9_ .:-]{1,120}$`（与 `logger.ts:118` 的 `SAFE_BA_MESSAGE_REGEX` 写法相同）测试结果为 False，即按该正则会被挡成 withheld；这与观察到的 withheld 行不矛盾（对消息文本与正则的实测，不是对 `forwardBetterAuthLog` 的测试，也没有看到 withheld 行的真实内容）。该消息还提到可设置 `advanced.ipAddress.ipAddressHeaders` 或 `advanced.ipAddress.trustedProxies`。两处日志里 withheld 行与随后请求日志行的时间差分别为 11 ms、10 ms，均不大于该请求的 `durationMs`（16、15），与"出现在请求内部"不矛盾（`s63b0-api-log-before.txt:1-2`、`s63b0-compose-log-after.txt:29,31`）。该请求是否没带 `x-forwarded-for`、withheld 的实际内容，都没有验证，所以仍只是候选。
+
+e2e 与证据口径：
+7. 针对已存在功能的 e2e 不适用"先因功能缺失而失败"；作者在 S6 计划阶段于对话中批准用断言级红对照加行为级变异（ME 系列）替代，无文件记录，日期未记录。
+8. E3 通过不能单独证明后端中间件拒绝了 B：前端 `use-org-role.ts:45-49` 有第二道判断（成员列表里找不到当前用户就显示"访问受限"），后端 `requireRole` 在 `memberRole` 为 undefined 时 fail-closed（`auth-middleware.ts:68-73`）。这只覆盖 undefined；与 `Object.prototype` 同名的角色串仍是 fail-open（DEV-S4B-05 第 13 项，对表达式副本的实测）。后端隔离靠 I1–I4。
+9. E3 里"A 的标题 count 为 0"在开发库分页下抓不到泄露（开发库有 100 多个旧活动，列表按 `starts_at` 升序每页 20 条）；起哨兵作用的是 `e2e/e3.spec.ts:90` 的"暂无活动"可见断言；ME-3'' 把排序翻转为 desc 是为了让泄露在第一页可见（DEV-S6-04）。"在 CI 空库里单点去掉 organization_id 条件就够"只是代码阅读推断：空库里 A 的活动必在第一页，没有做实验。
+10. E0 的"页面无错误提示"断言在 waitForResponse 之后立刻检查 count 为 0，UI 没更新时也会通过；真正守住 415 缺陷的是"sign-out 必须返回 200"（`e2e/e0.spec.ts:48-61`，ME-1 为证）。
+11. 失败产物：只验证到"成功运行后 `test-results` 里没有邀请链接"，以及 ME/MC 六次失败后的扫描命中 0。Playwright 每次运行开头会清空 `test-results`（S6-2c-0 回报的源码证据）。"在 A 的成员页失败时，页面快照是否含邀请链接"仍未验证。`test-results/` 已被 gitignore（`.gitignore:7`），CI 的 e2e job 不上传 artifact，风险只在本地。
+12. 本地 `pnpm gate` 的 e2e 测的是当前正在运行的栈（`playwright.config.ts` 没有 webServer，baseURL 取环境变量）；最终 gate 前必须新鲜重建；CI 每次新构建不受影响。
+13. e2e 数据残留在开发库（`e2e-<hex>@example.com` 用户；外键 RESTRICT 清不掉，见 DEV-S2-02、DEV-S2-03、DEV-S3-01）；ME-2 留下一个"有候补但确认数小于名额"的活动行，不删除不修复。2026-11-09 22:33（重建前）为 140|1|0，gate 之后为 143|1|0（`s63b0-raw.txt`）。
+14. 只测了 Chromium；HTTPS 与 Secure Cookie 未验证；e2e 失败会阻断合并没有任何证据（S6-4 才读回分支保护，不做临时 PR 演示）；前端页面除 E0–E3 外仍按"作者手工走通（手工报告，非自动化证据）"。
+15. 2026-11-08 15:03 UTC 有一轮 e2e 不在任何 raw 文件里，谁跑的不知道；`s6-2c0-raw.txt:155` 只有日志时间跨度里的 `latestTime`。
+镜像与构建：
+16. `apps/api/Dockerfile` 的 `pnpm install` 没有 `--prod`（`NODE_ENV=production` 在后面才设置），按 Dockerfile 阅读，根 devDependencies（含 `@playwright/test`）可能被一起装进镜像（Dockerfile 第 14、22、27 行；没有进入镜像内查看，未验证）；web 镜像体积从 1.63GB 变为 1.68GB（`s6-2a-close-raw.txt:967`、`s6-2b2-raw.txt:304`），原因未核实；api 容器以 root 运行（DEV-S4B-05 第 5 项）；`node src/index.ts` 直接运行 TypeScript，不经类型检查。
+17. 镜像 ID 与 Created 的异常：2026-11-08 重建后 api 镜像 ID 由 `2d3d1ee0cd35` 变为 `531a95752e24`，Created 都是 `2026-11-08T05:02:01.612258797Z`（`s6-2a-close-raw.txt:970`、`s6-2c0-raw.txt:226`）。2026-11-09 重建前，api 容器用的是 `sha256:ad2b3091…`，而 `event-system-api:latest` 指向 `sha256:643dfb39…`（Created `2026-11-08T16:49:03.986532743Z`）；重建后容器与 tag 都是 `sha256:efbd03b3…`，但它的 Created 仍是 `2026-11-08T16:49:03.986532743Z`，web 镜像的 Created 则更新为 `2026-11-09T13:34:28.300418933Z`（`s63b0-raw.txt`）。原因均未核实。结论：镜像 Created 不能当作构建时间；最终 gate 之前的新鲜重建，改用"容器 Created 时间、容器镜像 ID 等于 tag 的 ID、容器内关键源码文件哈希与当前提交一致"来证明。
+18. S6-2a 的锁文件重新解析了 peer 变体；已核对 packages 段只新增三个包（`s6-2a-raw.txt:331,343,348`）。
+诊断步骤：
+19. PRD 第 8 节两项诊断（删掉 `FOR UPDATE` 后 C7 变红；把 `clock_timestamp()` 换成 `now()` 后 C6 等锁交错用例变红）的最近一次证据是 S4b 的 N1、N2（DEV-S4B-05，另见 DEV-S3-07、DEV-S4-05 的 M1、M2）。之后 S5、S6 又改过代码，这两项诊断没有在当前 HEAD 重跑。DEV-S4-05 的 M3、M6 已由 DEV-S4B-02 更正。
+沿用：DEV-S4B-05 与 DEV-S5-07 的清单；名单接口不分页；HTTPS 与 Secure Cookie 未验证。
+
+## 2026-11-11 S6 测试矩阵与证据口径（DEV-S6-08）
+
+- 口径与来源：
+  - 本条依据 2026-11-09 本地一次完整 `pnpm gate` 前后的输出（作者本机时间约 22:35–22:38）。`s63b0-gate.txt` 最后写入 22:36:45；`s63b0-integration-verbose.txt`、`s63b0-concurrency-verbose.txt` 最后写入 22:37:44、22:37:59，晚于它，两个文件的第 1 行分别是 `vp test -c vite.integration.config.ts --run --reporter=verbose` 与 `vp test -c vite.concurrency.config.ts --run --reporter=verbose`，所以它们是单独运行的 verbose 输出，不是 gate 输出本身。这几次运行时的 HEAD 与工作区状态没有单独留证。
+  - 所有记录文件都在作者本机 `%TEMP%`，没有入库。
+  - gate 的 e2e：`s63b0-gate.txt` 第 507、508、509、510 行为 4 个用例 ok（E0–E3，见 DEV-S6-02）。gate 里其余数字（单元 16、迁移 3 条 9 张表、next build 路由 6 条）来自此前回报，本条写入时没有重新读取。
+  - 两个 verbose 文件含 ANSI 转义字节（集成 2366 个、并发 222 个），编码为 UTF-8，没有 NUL。用 `^\s*✓ ` 直接匹配得 0 条，去掉转义后得集成 195、并发 19；据此推断此前得 0 的原因是行首的转义序列（由去转义前后的命中数对比得出）。去转义后的副本是 `s63b9c-integration-clean.txt`（SHA-256 7E1B5099E32FEE75F57BB7EA1712D9D8CBEA6863AF250EE29B2C5397D2D1E1C8）与 `s63b9c-concurrency-clean.txt`（SHA-256 5E7C3BEA49F2C866933032132D349A2DA64F752FF740216895B524297C1BBC86），行数与原文件相同（587、30）。下文"verbose行"指集成副本的行号。
+  - 汇总行：集成 `Test Files 11 passed (11)`、`Tests 195 passed (195)`（副本第 582、583 行）；并发 `Test Files 3 passed (3)`、`Tests 19 passed (19)`（副本第 25、26 行）。
+- 每个文件的 ✓ 数（来自 verbose 输出，按文件名分组）：
+  - 集成，11 个文件，合计 195：d4-api-contract 24、event-reads 13、events-k1 10、events 41、invitation-i6 2、isolation 68、logging 8、registrations-k2 7、registrations 15、smoke 1、team-management-i7 6。
+  - 并发，3 个文件，合计 19：registrations.concurrency 3、cancel-promote.concurrency 5、time-rules.concurrency 11。
+  - e2e：4。
+  - 映射脚本对两个副本的总数为 214 = 195 + 19，与上面一致。与源码 `it` 数的对账本轮没有重做；此前回报称 d4 与 isolation 的 ✓ 数多于 `it` 数、差额来自 `it.each`，没有被独立印证。
+- PRD 编号与用例的对应（只按用例标题里的编号）：
+  - 口径：从最后一层标题往前找，以 K1、K2、C1–C8、A1、I1–I7、F-T1、F-T2 开头的一层。这只是标签对应，不是 PRD 条文覆盖：每条用例的断言是否逐条满足 PRD 文字，本记录没有核对。同一标签在不同文件里的含义可能不同，例如 `events.integration.test.ts` 的 "A1: Event Creation"、"A1: Event Listing" 是该文件自己的分组名（verbose 行 495、509 所示）。
+  - K1：10（events-k1）。K2：7（registrations-k2）。
+  - C1、C2、C7 各 1（registrations.concurrency）；C3、C4、C5 各 1、C8 2（含 "C8 (new)"）（cancel-promote）；C6 5、F-T1 3、F-T2 3（time-rules）。F-T1、F-T2 是 S4b 加固用例，C8 (new) 同。
+  - A1：66，其中 d4-api-contract 24、events 31、registrations 11。A1 的子句级核对没有保留证据，不声称逐条覆盖 PRD 的 A1。
+  - I1：12（isolation 10、events 2）。I2：42（isolation 40、events 2）。I3：9（isolation 7、registrations 2）。I4：6（isolation 5、events 1）。I5：1（isolation）。I6：2（invitation-i6）。I7(a) 1；I7(b) 3（registrations 1、team-management-i7 2）；I7(c) 1；I7(d) 2（后三项在 team-management-i7）。
+  - 标题里没有这些编号的 ✓ 共 33：event-reads 13、events 5、isolation 5、logging 8、registrations 1、smoke 1。有编号的 181，181 + 33 = 214。isolation 的 5 个无编号用例的名称本轮输出里没有列出。
+  - 复核：S6-3b-10 里读到的集成副本第 340–344 行，标题都含 "I4: Member role attempting admin-only routes returns 403 and leaves DB unchanged" 这一层；作者随后在不经代理的情况下重算映射，I4 为 6（events 1、isolation 5），与之相符。S6-3b-9c 的映射输出里 343、344 行缺这一层的打印，与这两项独立结果不符，原因没有查明（可能是回报转录问题，未证实）。
+- 用例名清单（取自集成副本，行号为副本行号；DEV-S6-01 引用的 logging 用例名在此）：
+  - `logging.integration.test.ts`，8 个（L2–L9 是该文件自己的编号，不是 PRD 编号）：
+    - verbose行555 | S6 Logging Integration Tests (L2 - L9) > L2: logs exactly one request log for authorized org request with required fields, and null userId on 401
+    - verbose行556 | S6 Logging Integration Tests (L2 - L9) > L3: never leaks passwords, cookies, authorization tokens, invitation ids, or Set-Cookie values in logs
+    - verbose行557 | S6 Logging Integration Tests (L2 - L9) > L4: fault injection produces 500 response, exactly one error log without leaked message/stack sentinels
+    - verbose行558 | S6 Logging Integration Tests (L2 - L9) > L5: ignores client-provided X-Request-Id and generates server UUID
+    - verbose行559 | S6 Logging Integration Tests (L2 - L9) > L6: /api/auth/get-session response includes X-Request-Id matching its request log
+    - verbose行560 | S6 Logging Integration Tests (L2 - L9) > L7: GET /doc produces no logs under default level, and appears under debug level
+    - verbose行561 | S6 Logging Integration Tests (L2 - L9) > L8: auth.handler throwing Error with invalid identifiers omits unsafe fields
+    - verbose行562 | S6 Logging Integration Tests (L2 - L9) > L9: Better Auth database failure does not leak SQL text, params, or tokens
+  - `smoke.integration.test.ts`，1 个：
+    - verbose行580 | PostgreSQL test infrastructure smoke test > successfully creates and migrates a temporary test database
+  - `event-reads.integration.test.ts`，13 个：
+    - verbose行131 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Detail: GET /api/orgs/:orgId/events/:eventId > D-1 成员读取：200，字段齐全，计数是数字，没有报名时 myRegistration 为 null
+    - verbose行132 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Detail: GET /api/orgs/:orgId/events/:eventId > D-2 我报名后：myRegistration.id 等于数据库里的报名 id，状态正确（confirmed 和 waitlisted 各一例），计数随之变化
+    - verbose行133 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Detail: GET /api/orgs/:orgId/events/:eventId > D-3 我取消后：myRegistration 为 null，计数不含已取消
+    - verbose行154 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Detail: GET /api/orgs/:orgId/events/:eventId > D-4 用户 B 报名，用户 A 读取：A 的 myRegistration 仍为 null
+    - verbose行155 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Detail: GET /api/orgs/:orgId/events/:eventId > D-5 跨组织：A 组织 admin 在 /orgs/<A>/ 下用 B 组织的 eventId，404 NOT_FOUND。非成员 403。未登录 401。非法 UUID：成员 400 VALIDATION，非成员 403
+    - verbose行156 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Detail: GET /api/orgs/:orgId/events/:eventId > D-6 已取消的活动：200，status 为 cancelled
+    - verbose行157 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Detail: GET /api/orgs/:orgId/events/:eventId > D-7 500 映射：用 vi.spyOn 注入底层异常，断言 500 INTERNAL_ERROR，且响应不含 SQL 或内部细节
+    - verbose行170 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Registrations List: GET /api/orgs/:orgId/events/:eventId/registrations > R-1 admin 和 owner 返回 200；member 返回 403。只含有效报名，不含已取消。顺序与数据库里 seq 升序一致
+    - verbose行171 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Registrations List: GET /api/orgs/:orgId/events/:eventId/registrations > R-2 每项的键集合恰好是 id、userId、name、status、createdAt，不多不少。整个响应 JSON 文本里不含该用户的 email 字符串
+    - verbose行187 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Registrations List: GET /api/orgs/:orgId/events/:eventId/registrations > R-3 用户取消后重新报名：只出现一次，且排在队尾
+    - verbose行188 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Registrations List: GET /api/orgs/:orgId/events/:eventId/registrations > R-4 跨组织 eventId 404，非成员 403，未登录 401，非法 UUID（admin 调用）400
+    - verbose行189 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Registrations List: GET /api/orgs/:orgId/events/:eventId/registrations > R-5 调用前后数据库快照不变
+    - verbose行196 | S5-1 Event Read Endpoints Integration Tests (Detail & Registrations List) > Event Registrations List: GET /api/orgs/:orgId/events/:eventId/registrations > D-8 500 映射：名单路由用 vi.spyOn 注入底层异常，断言 500 INTERNAL_ERROR，且响应不含 SQL 或内部细节
+- M13（变异实验，作者已批准；记录 `s63b9-raw.txt`，339 行，SHA-256 B3EC89F9F3561A67923A018497AFD8F47BC450E612E170043015928762D9A843；每次运行输出另存 `s63b9-c-run-1.txt` 至 `s63b9-c-run-4.txt`）：
+  - 改动：`apps/api/src/logger.ts` 第 198 行 `Object.assign(fields, errorFields);` 改为 `Object.assign(fields, errorFields, { rawError: firstObj });`，`git diff --numstat` 为 1 1，使转发的 Better Auth 日志带上原始错误对象。
+  - 基线：`vp test -c vite.integration.config.ts --run --reporter=verbose apps/api/src/logging.integration.test.ts -t L9` 得 `8 passed (8)`。`-t L9` 同时匹配 describe 名 "(L2 - L9)"，所以该命令实际跑了 logging 文件的全部 8 个用例，不是只跑 L9。
+  - 变异后同一命令：`1 failed | 7 passed (8)`，只有 L9 红，`AssertionError: expected '{"baMessage":"INTERNAL_SERVER_ERROR",…' not to contain 'SENTINEL_SQL_TEXT_333'`，位置 `apps/api/src/logging.integration.test.ts:599:28`；该文件第 599 行是 `expect(output).not.toContain(SENTINEL_SQL_TEXT);`。红在第 599 行，按断言顺序推断此前第 547、568、575、592–593 行的断言没有先失败。
+  - 还原：用 Copy-Item 从备份还原，SHA-256 回到 70B6AD47BC0BFD0832E5D72429DD9A8446716F903A35695460A22E1007D9CE3B，`git diff --numstat -- apps/api/src/logger.ts` 无输出；还原后同一命令 `8 passed (8)`，整个 logging 文件 `8 passed (8)`。
+  - 作用：补上"L9 的泄露断言（`logging.integration.test.ts` 第 597–603 行的循环）在泄露发生时会变红"的直接证据。DEV-S6-01 的 M11 红在第 575 行、M12 红在第 547 行，都没有走到这一段。
+  - 限制：第 597 行先用 `filter(o => !o.includes(SENTINEL_CONTROL))` 过滤，含对照哨兵的输出不参与泄露检查（代码阅读，没有做实验）；只做了一种注入、运行一次；该变异走的是 `forwardBetterAuthLog` 路径，L4、L8 的泄露断言没有单独做变异。
+- DEV-S6-04 行号修正的依据：`s6-2c1-raw.txt` 的标题行为第 4、48、107、172、182、264、282、362、440、502、518、559 行；ME-3 标题 282 前后分隔线为 281、283，ME-2 标题 362 前的分隔线为 361，STEP 8b 标题 502 前的分隔线为 501，MC-3 运行标题 182 前后分隔线为 181、183，下一个标题 264 前的分隔线为 263。口径是"标题行到下一节分隔线之前一行"，据此 ME-3 为 282–360、ME-1 为 440–500、MC-3 为 172–262。DEV-S6-04 里 ME-2 的红行号与计数行号、MC-1 与 MC-2 的终点，后来在 S6-3b-10 逐行读过：分隔线在第 106、171 行（所以 MC-1 止于 105、MC-2 止于 170）；第 401 行是 `Error: expect(locator).toBeVisible() failed`，第 414、415 行是 `e2e/e2.spec.ts` 第 192、193 行的源码片段（第 415 行带 `>` 标记的是 `已确认` 断言），第 426–436 行含 `1 failed`、`3 passed (15.8s)` 与 B1 计数。这些是对 `s6-2c1-raw.txt` 的读取，不是重新运行。
+- CI 状态（据此前回报与 `ci.yml` 阅读，本条没有访问 GitHub）：
+  - `e2e` job 已写入 `ci.yml`（DEV-S6-05），从未在 GitHub 上运行。
+  - 其余 5 个 job 在当前分支上没有运行（分支未推送）。main 上 PR #13 的 CI，作者回报 5 项全绿，没有核对 GitHub。
+  - `docker-build` 与"重复 5 次的并发 job"只在 CI 里跑，`pnpm gate` 不含它们。
+  - 本地迁移校验脚本是 `verify:migration`（`package.json` 第 13 行），CI 的 `empty-db-migration` 用的是 `verify:migrated`，两者不是同一个命令。
+- PRD 第 8 节两项诊断（去掉 `FOR UPDATE` 后 C7 变红；把 `clock_timestamp()` 换成 `now()` 后 C6 等锁交错用例变红）：最近证据是 DEV-S3-07、DEV-S4-05 的 M1/M2、DEV-S4B-05 的 N1/N2，没有在当前 HEAD 重跑（同 DEV-S6-07 第 19 条）。
+- 本条未验证或不成立的部分：
+  1. 编号映射只按用例标题；每条用例的断言是否逐条满足 PRD 文字，没有核对。A1 与 C 系列都是如此。
+  2. 与源码 `it` 数的对账没有重做。
+  3. S6-3b-9c 输出里 verbose 行 343、344 缺 "I4:" 层的打印，与后来的独立读取和重算不一致，原因没有查明（见上文"复核"一条）。
+  4. `e0.spec.ts` 第 54 行的 `waitForResponse` 谓词本身要求状态 200，第 58 行的 `toBe(200)` 是冗余的（来自 S6-3b-8 的取证）；真正守住 415 缺陷的是该谓词加 30 秒超时。
+  5. 当前 HEAD 上没有连续重复运行并发测试的证据。4 个 e2e 用例连续 5 次的记录在 S6-2b-1、S6-2b-2 的回报里，没有复核。
+  6. 所有记录文件（`%TEMP%` 下）都没有入库。
+  7. 本地 gate 的 e2e 测的是当时正在运行的栈（DEV-S6-07 第 12 条）。
+  8. E3 与 PRD 第 8 节 E3 条文的关系，见 DEV-S6-07 第 8、9 条。
+- 提交前抽查（作者自己在 PowerShell 里运行，不经代理，2026-11-11；输出没有入库）：重算两个副本的编号映射，结果与上文逐项一致（总数 214）；逐行读取下列位置，与 DEV-S6-01 至 DEV-S6-08 的引用对照，可见内容与引用相符：`@better-auth/core` 的 `ip.mjs` 第 190、192、195、203–217 行与 `factory.mjs` 第 387–394 行；`better-auth` 的 `create-context.mjs` 第 44、45、65、154、172–175 行、`rate-limiter/index.mjs` 第 235、244–247、305–312 行、`auth/base.mjs` 第 7–11 行；`drizzle-orm` 的 `errors.js` 第 14–15 行；`e2e/e0.spec.ts` 第 49–58 行、`e2e/e3.spec.ts` 第 90–91 行、`.github/workflows/ci.yml` 第 238–243、340–346 行（共 345 行）、`apps/api/src/auth.ts` 第 15、26–31 行、`apps/api/src/logger.ts` 第 117–118、198 行、`s63b0-api-log-before.txt` 第 1–2 行、`s63b0-compose-log-after.txt` 第 29–31 行。第一轮输出每行只截取前 120 个字符；`rate-limiter/index.mjs` 第 245 行、`ip.mjs` 第 203–216 行、`factory.mjs` 第 393–394 行、`base.mjs` 第 7–11 行、`ci.yml` 第 340–346 行是第二轮完整读取的。没有读到的：`ip.mjs` 第 185–189、218–219 行。
+- 过程记录：S6-3b 期间有几份代理回报的部分内容与原始文件不符（含编造的输出与行号），已用已知哈希、作者自己运行的命令和"命令在上、输出在下"的取证重新核对，不符的内容已丢弃，没有写入任何记录。
+
+## 2026-11-14 PR #14 首次 CI 的两项失败与处理（DEV-S6-09）
+
+- 事实：PR #14 在提交 `4a5c4b2` 上第一次运行 CI，6 项里 `ci`、`docker-build`、`empty-db-migration`、`concurrency-tests` 成功，`integration-tests` 与 `e2e` 失败（GitHub check-runs API 读取）。
+- integration-tests：失败用例是 `events.integration.test.ts` 第 353 行的 `expected 400 to be 201`（非 UTC 偏移那个用例），本地复现同一位置。
+  - 根因（已验证）：该用例第 334–335 行写死 `2026-11-10`，本地时钟当时为 2026-11-14，`apps/api/src/index.ts` 第 841 行对不晚于数据库当前时间的 `startsAt` 返回 400 `VALIDATION`。这是 S2 留下的时间炸弹，本分支没有改动过该文件（与 main 比较无差异）。11-09 的本地 gate 时该日期还在未来（推断，依据是日期先后）。
+  - 修复：提交 `1a4e98d`，改为按运行时刻加 10 天计算日期，保留 `+09:00` 与 `-05:00` 两个偏移和全部 3 条断言。本地该文件 41 个用例通过；`1a4e98d` 上 CI 的 `integration-tests` 成功。
+  - 扫描：对 `*.test.ts` 与 `e2e/` 下的 ISO 日期字面量做了 git grep，只剩 `d4-api-contract.integration.test.ts:577` 一处，用作 PATCH 里应被 `.strict()` 拒绝的未知字段，与日期是否过期无关。扫描只覆盖这种写法，不覆盖 `Date.UTC` 等构造方式。
+- e2e：`4a5c4b2` 上 "Start Docker stack" 步骤退出码 1，整个 job 约 32 秒，没有拿到日志。
+  - 候选原因（未验证）：`apps/web/Dockerfile` 第 1 行是 `FROM event-system-api:latest`，而 e2e job 在全新 runner 上直接 `docker compose up -d --build`，没有先构建该镜像；`docker-build` job 先建 api 再建 web，所以通过。
+  - 修改：`1a4e98d` 在起栈前加一步 `docker build` API 镜像，并把起栈输出的末尾做成 `::error::` annotation。同一提交上 e2e 的 job 结论为 success。
+  - 限制：只有一次运行；改动同时改了起栈命令的写法（`--progress=plain` 加输出重定向），不能证明候选原因就是真因，也不能排除偶发失败。失败分支的 annotation 没有被触发过，格式未验证。
+- 过程问题：S6-3c-3 阶段，执行代理的子代理运行了授权外的命令（据其自述包括其余单元测试、全量集成测试、并发测试、迁移校验、前端构建），没有记录，这些命令的结果不采信；其后的指令禁用子代理。同一回报里还混入了重新打字的输出，只采信了能互相印证的数字（41 个用例、哈希前后一致）。
+- 未解：PR #14 在必需检查 `integration-tests` 失败时 `mergeable_state` 是 `unstable` 而不是 `blocked`，原因没有查明；公开视图读到的必需检查是 `ci`、`integration-tests`、`empty-db-migration`、`docker-build`、`concurrency-tests` 五项，不含 `e2e`，比 DEV-S2 的 8b 记录多一项 `concurrency-tests`，何时加入没有记录。
