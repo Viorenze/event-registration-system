@@ -937,3 +937,17 @@ e2e 与证据口径：
   8. E3 与 PRD 第 8 节 E3 条文的关系，见 DEV-S6-07 第 8、9 条。
 - 提交前抽查（作者自己在 PowerShell 里运行，不经代理，2026-11-11；输出没有入库）：重算两个副本的编号映射，结果与上文逐项一致（总数 214）；逐行读取下列位置，与 DEV-S6-01 至 DEV-S6-08 的引用对照，可见内容与引用相符：`@better-auth/core` 的 `ip.mjs` 第 190、192、195、203–217 行与 `factory.mjs` 第 387–394 行；`better-auth` 的 `create-context.mjs` 第 44、45、65、154、172–175 行、`rate-limiter/index.mjs` 第 235、244–247、305–312 行、`auth/base.mjs` 第 7–11 行；`drizzle-orm` 的 `errors.js` 第 14–15 行；`e2e/e0.spec.ts` 第 49–58 行、`e2e/e3.spec.ts` 第 90–91 行、`.github/workflows/ci.yml` 第 238–243、340–346 行（共 345 行）、`apps/api/src/auth.ts` 第 15、26–31 行、`apps/api/src/logger.ts` 第 117–118、198 行、`s63b0-api-log-before.txt` 第 1–2 行、`s63b0-compose-log-after.txt` 第 29–31 行。第一轮输出每行只截取前 120 个字符；`rate-limiter/index.mjs` 第 245 行、`ip.mjs` 第 203–216 行、`factory.mjs` 第 393–394 行、`base.mjs` 第 7–11 行、`ci.yml` 第 340–346 行是第二轮完整读取的。没有读到的：`ip.mjs` 第 185–189、218–219 行。
 - 过程记录：S6-3b 期间有几份代理回报的部分内容与原始文件不符（含编造的输出与行号），已用已知哈希、作者自己运行的命令和"命令在上、输出在下"的取证重新核对，不符的内容已丢弃，没有写入任何记录。
+
+## 2026-11-14 PR #14 首次 CI 的两项失败与处理（DEV-S6-09）
+
+- 事实：PR #14 在提交 `4a5c4b2` 上第一次运行 CI，6 项里 `ci`、`docker-build`、`empty-db-migration`、`concurrency-tests` 成功，`integration-tests` 与 `e2e` 失败（GitHub check-runs API 读取）。
+- integration-tests：失败用例是 `events.integration.test.ts` 第 353 行的 `expected 400 to be 201`（非 UTC 偏移那个用例），本地复现同一位置。
+  - 根因（已验证）：该用例第 334–335 行写死 `2026-11-10`，本地时钟当时为 2026-11-14，`apps/api/src/index.ts` 第 841 行对不晚于数据库当前时间的 `startsAt` 返回 400 `VALIDATION`。这是 S2 留下的时间炸弹，本分支没有改动过该文件（与 main 比较无差异）。11-09 的本地 gate 时该日期还在未来（推断，依据是日期先后）。
+  - 修复：提交 `1a4e98d`，改为按运行时刻加 10 天计算日期，保留 `+09:00` 与 `-05:00` 两个偏移和全部 3 条断言。本地该文件 41 个用例通过；`1a4e98d` 上 CI 的 `integration-tests` 成功。
+  - 扫描：对 `*.test.ts` 与 `e2e/` 下的 ISO 日期字面量做了 git grep，只剩 `d4-api-contract.integration.test.ts:577` 一处，用作 PATCH 里应被 `.strict()` 拒绝的未知字段，与日期是否过期无关。扫描只覆盖这种写法，不覆盖 `Date.UTC` 等构造方式。
+- e2e：`4a5c4b2` 上 "Start Docker stack" 步骤退出码 1，整个 job 约 32 秒，没有拿到日志。
+  - 候选原因（未验证）：`apps/web/Dockerfile` 第 1 行是 `FROM event-system-api:latest`，而 e2e job 在全新 runner 上直接 `docker compose up -d --build`，没有先构建该镜像；`docker-build` job 先建 api 再建 web，所以通过。
+  - 修改：`1a4e98d` 在起栈前加一步 `docker build` API 镜像，并把起栈输出的末尾做成 `::error::` annotation。同一提交上 e2e 的 job 结论为 success。
+  - 限制：只有一次运行；改动同时改了起栈命令的写法（`--progress=plain` 加输出重定向），不能证明候选原因就是真因，也不能排除偶发失败。失败分支的 annotation 没有被触发过，格式未验证。
+- 过程问题：S6-3c-3 阶段，执行代理的子代理运行了授权外的命令（据其自述包括其余单元测试、全量集成测试、并发测试、迁移校验、前端构建），没有记录，这些命令的结果不采信；其后的指令禁用子代理。同一回报里还混入了重新打字的输出，只采信了能互相印证的数字（41 个用例、哈希前后一致）。
+- 未解：PR #14 在必需检查 `integration-tests` 失败时 `mergeable_state` 是 `unstable` 而不是 `blocked`，原因没有查明；公开视图读到的必需检查是 `ci`、`integration-tests`、`empty-db-migration`、`docker-build`、`concurrency-tests` 五项，不含 `e2e`，比 DEV-S2 的 8b 记录多一项 `concurrency-tests`，何时加入没有记录。
