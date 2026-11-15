@@ -4,6 +4,6 @@
 .git
 .github
 *.log
-.env
-.env.*
+**/.env
+**/.env.*
 !.env.example

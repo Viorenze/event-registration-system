@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { type Db, createDbClient, pg } from "@event-system/db";
-import { setupTestDatabase, type TestDatabaseContext } from "./test-helper.ts";
+import { shouldKeepTestDb, setupTestDatabase, type TestDatabaseContext } from "./test-helper.ts";
 import { register } from "./registrations.ts";
 
 describe("Registrations Concurrency Infrastructure & Tests (C1, C2, C7)", () => {
@@ -39,17 +39,21 @@ describe("Registrations Concurrency Infrastructure & Tests (C1, C2, C7)", () => 
 
   afterAll(async () => {
     if (adminClient) {
-      try {
-        await adminClient.query(`DELETE FROM registrations WHERE organization_id = $1`, [
-          fixtureOrgId,
-        ]);
-      } catch {}
-      try {
-        await adminClient.query(`DELETE FROM events WHERE organization_id = $1`, [fixtureOrgId]);
-        await adminClient.query(`DELETE FROM "member" WHERE organization_id = $1`, [fixtureOrgId]);
-        await adminClient.query(`DELETE FROM "user" WHERE id = $1`, [fixtureOwnerId]);
-        await adminClient.query(`DELETE FROM organization WHERE id = $1`, [fixtureOrgId]);
-      } catch {}
+      if (!shouldKeepTestDb()) {
+        try {
+          await adminClient.query(`DELETE FROM registrations WHERE organization_id = $1`, [
+            fixtureOrgId,
+          ]);
+        } catch {}
+        try {
+          await adminClient.query(`DELETE FROM events WHERE organization_id = $1`, [fixtureOrgId]);
+          await adminClient.query(`DELETE FROM "member" WHERE organization_id = $1`, [
+            fixtureOrgId,
+          ]);
+          await adminClient.query(`DELETE FROM "user" WHERE id = $1`, [fixtureOwnerId]);
+          await adminClient.query(`DELETE FROM organization WHERE id = $1`, [fixtureOrgId]);
+        } catch {}
+      }
       adminClient.release();
     }
     if (ctx) {

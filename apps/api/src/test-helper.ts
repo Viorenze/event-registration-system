@@ -15,7 +15,14 @@ export interface TestDatabaseContext {
   cleanup: () => Promise<void>;
 }
 
-export async function setupTestDatabase(): Promise<TestDatabaseContext> {
+export function shouldKeepTestDb(): boolean {
+  return process.env.KEEP_TEST_DB === "1";
+}
+
+export async function setupTestDatabase(options?: {
+  keep?: boolean;
+}): Promise<TestDatabaseContext> {
+  const keep = options?.keep ?? shouldKeepTestDb();
   if (!process.env.DATABASE_URL && typeof process.loadEnvFile === "function") {
     try {
       process.loadEnvFile();
@@ -130,9 +137,13 @@ export async function setupTestDatabase(): Promise<TestDatabaseContext> {
         if (drizzlePool && typeof drizzlePool.end === "function") {
           await drizzlePool.end().catch(() => {});
         }
-        await adminPool
-          .query(`DROP DATABASE IF EXISTS "${testDbName}" WITH (FORCE)`)
-          .catch(() => {});
+        if (keep) {
+          console.log(`[test-helper] KEEP_TEST_DB: kept database ${testDbName}`);
+        } else {
+          await adminPool
+            .query(`DROP DATABASE IF EXISTS "${testDbName}" WITH (FORCE)`)
+            .catch(() => {});
+        }
       } finally {
         await adminPool.end().catch(() => {});
       }
