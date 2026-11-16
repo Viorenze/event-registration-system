@@ -183,7 +183,7 @@
 | GET | `/api/orgs/:orgId/events/:eventId` | member+ | 详情。200 返回 `eventDetailResponseSchema`：`eventResponseSchema` 加 `confirmedCount`、`waitlistedCount`（有效报名计数，同活动列表）和 `myRegistration`（当前用户的有效报名 `{ id, status }`，`status` 为 `confirmed` 或 `waitlisted`；没有有效报名为 `null`）。活动不属于该团队 404 |
 | PATCH | `/api/orgs/:orgId/events/:eventId` | admin+ | 修改活动（含名额）。成功返回 200 及创建活动响应 DTO（复用 `apps/api/src/index.ts` 中的 `eventResponseSchema`，字段详见下文，不含 `confirmedCount`、`waitlistedCount`）。请求体只接受 `title`、`description`、`capacity`，至少一项，拒绝未知字段（`.strict()`）。开始时间与截止时间不可改。请求体含 `capacity` 字段即视为改名额（不比较新旧值），开始后含 `capacity` 一律 409 `EVENT_STARTED`，只改标题或说明允许；`description` 传 `null` 为清空，缺省为不变 |
 | POST | `/api/orgs/:orgId/events/:eventId/cancel` | admin+ | 取消活动（BR-10 保留）。成功返回 200 及创建活动响应 DTO（同上复用 `eventResponseSchema`，`status` 为 `cancelled`） |
-| POST | `/api/orgs/:orgId/events/:eventId/registrations` | member+ | 报名当前用户；首次创建报名返回 201，重复报名（返回已有报名，BR-9）返回 200；响应体都带报名 id 和状态（其余字段在 D3 契约定稿时写入本表） |
+| POST | `/api/orgs/:orgId/events/:eventId/registrations` | member+ | 报名当前用户；首次创建报名返回 201，重复报名（返回已有报名，BR-9）返回 200；响应体都带报名 id 和状态（响应体为 `{ id, eventId, userId, status, createdAt }`，`createdAt` 为 ISO 8601 字符串，不含 `seq`、`organizationId`；实现见 `apps/api/src/index.ts` 的 `registrationResponseSchema`） |
 | DELETE | `/api/orgs/:orgId/events/:eventId/registrations/me` | member+ | 取消自己的报名；成功取消返回 204；没有有效报名时也返回 204 且不改库（幂等），但活动已取消或已开始时先返回 409（见第 6 节） |
 | DELETE | `/api/orgs/:orgId/events/:eventId/registrations/:registrationId` | admin+ | 取消他人的报名；按 `registrationId + eventId + organizationId` 查找，查不到 404；成功取消或已取消均返回 204 |
 | GET | `/api/orgs/:orgId/events/:eventId/registrations` | admin+ | 报名名单。200 返回数组，每项 `{ id, userId, name, status, createdAt }`；只含有效报名（`confirmed`、`waitlisted`），按 `seq` 升序；不含 `email`、`seq`、`organizationId`；不分页。活动不属于该团队 404 |
@@ -293,18 +293,18 @@ C 系列直调业务层，不能证明路由层返回了正确的 HTTP 状态码
 | I3 | A 组织 admin 在 `/orgs/<A>/…` 里使用 B 组织的活动 id（读、改、报名、取消） | 404，数据库不变 |
 | I4 | member 调用 admin+ 接口 | 403 |
 | I5 | 路由表完整性：取 Hono 实际注册的处理器路由，减去显式豁免清单，剩下的（方法, 路径）集合必须与路由表的集合完全相等 | 多一条（新增的、未分类的路由）或少一条（路由表里有、实际不存在）都失败，这样新增路由必须同时加测试行 |
-| I6 | Better Auth 的邀请接口（在 `/api/auth/*` 下，被 I5 豁免，所以单独测）：A 组织的 member、B 组织的 owner（不是 A 组织成员）分别为 A 组织创建邀请；对照组：A 组织的 admin、owner 创建邀请；接受流程：用 admin 创建的同一条邀请，先由邮箱不匹配的登录用户接受，再由邮箱匹配的登录用户接受 | 创建：member 和非成员被拒绝（状态码 D2 实测后写入本表），`invitation` 表没有新增记录；admin 和 owner 成功，`invitation` 表各新增 1 条（对照组，证明被拒绝是因为权限，而不是接口本身配置错了）。接受：邮箱不匹配的用户被拒绝，`member` 表没有新增行；随后邮箱匹配的用户成功，`member` 表新增 1 行，角色与邀请一致（必须先测被拒绝的，因为接受成功后邀请状态会变） |
-| I7 | Better Auth 的团队管理接口（在 `/api/auth/*` 下，被 I5 豁免，所以单独测）：(a) 未登录创建团队；已登录用户创建团队。(b) A 组织的 owner 调用删除团队。(c) 移除成员、修改成员角色各用一名独立的 A 组织 member 作目标，互不影响对方的前置条件：A 组织的 member、B 组织的 owner（不是 A 组织成员）分别对各自的目标调用（改角色时改成 admin），先测被拒绝；对照组：A 组织的 owner 在这些被拒绝的用例之后，对各自的目标成功修改角色、成功移除成员。(d) A 组织的 admin 对 A 组织的 owner 调用修改角色（改成 member）、移除成员 | (a) 未登录被拒绝，`organization` 表没有新增；已登录用户成功，`member` 表里该用户在新团队的角色是 `owner`（BR-1）。(b) 被拒绝（删除已禁用），`organization`、`member`、`events` 的行数不变。(c) member 和非成员：被拒绝，`member` 表不变（行数和角色都不变）；对照组：owner 修改角色成功，该行角色变为 admin；owner 移除成员成功，该目标的 `member` 行被删除（证明被拒绝是因为权限，而不是接口本身配置错了，也不是目标已不存在）。(d) 被拒绝，`member` 表不变。被拒绝时的状态码 D2 实测后写入本表 |
+| I6 | Better Auth 的邀请接口（在 `/api/auth/*` 下，被 I5 豁免，所以单独测）：A 组织的 member、B 组织的 owner（不是 A 组织成员）分别为 A 组织创建邀请；对照组：A 组织的 admin、owner 创建邀请；接受流程：用 admin 创建的同一条邀请，先由邮箱不匹配的登录用户接受，再由邮箱匹配的登录用户接受 | 创建：member 和非成员被拒绝（实测，better-auth 1.7.11：member 返回 403 `YOU_ARE_NOT_ALLOWED_TO_INVITE_USERS_TO_THIS_ORGANIZATION`；非成员返回 400 `MEMBER_NOT_FOUND`），`invitation` 表没有新增记录；admin 和 owner 成功，`invitation` 表各新增 1 条（对照组，证明被拒绝是因为权限，而不是接口本身配置错了）。接受：邮箱不匹配的用户被拒绝，`member` 表没有新增行；随后邮箱匹配的用户成功，`member` 表新增 1 行，角色与邀请一致（必须先测被拒绝的，因为接受成功后邀请状态会变） |
+| I7 | Better Auth 的团队管理接口（在 `/api/auth/*` 下，被 I5 豁免，所以单独测）：(a) 未登录创建团队；已登录用户创建团队。(b) A 组织的 owner 调用删除团队。(c) 移除成员、修改成员角色各用一名独立的 A 组织 member 作目标，互不影响对方的前置条件：A 组织的 member、B 组织的 owner（不是 A 组织成员）分别对各自的目标调用（改角色时改成 admin），先测被拒绝；对照组：A 组织的 owner 在这些被拒绝的用例之后，对各自的目标成功修改角色、成功移除成员。(d) A 组织的 admin 对 A 组织的 owner 调用修改角色（改成 member）、移除成员 | (a) 未登录被拒绝，`organization` 表没有新增；已登录用户成功，`member` 表里该用户在新团队的角色是 `owner`（BR-1）。(b) 被拒绝（删除已禁用），`organization`、`member`、`events` 的行数不变。(c) member 和非成员：被拒绝，`member` 表不变（行数和角色都不变）；对照组：owner 修改角色成功，该行角色变为 admin；owner 移除成员成功，该目标的 `member` 行被删除（证明被拒绝是因为权限，而不是接口本身配置错了，也不是目标已不存在）。(d) 被拒绝，`member` 表不变。被拒绝时的状态码（实测，better-auth 1.7.11）：(a) 未登录创建团队 401；(b) 删除团队 404 `ORGANIZATION_DELETION_DISABLED`；(c) 修改角色：member 403 `YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER`，非成员 400 `MEMBER_NOT_FOUND`；移除成员：member 401 `YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_MEMBER`，非成员 400 `MEMBER_NOT_FOUND`；(d) admin 修改 owner 角色 403 `YOU_ARE_NOT_ALLOWED_TO_UPDATE_THIS_MEMBER`，admin 移除 owner 400 `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`（该错误码名对非 owner 调用者有误导性，见 DECISIONS.md DEV-S4B-04） |
 
 路由表是一个数据文件，每行包含方法、路径、最低角色。I1–I4 对它做参数化测试。
 
-豁免清单是另一个数据文件，按（方法, 路径）匹配，只列实际存在、不属于组织权限矩阵的路由。初始内容：`/api/auth/*`（Better Auth，通配；其中的邀请、团队管理接口由 I6、I7 单独测）、`/doc`（OpenAPI 文档）；若实现了健康检查路由，也写进去。新增任何豁免都必须经作者明确批准，不得自行扩大。从 Hono 取路由时要滤掉中间件项，具体写法 D2 实测。
+豁免清单是另一个数据文件，按（方法, 路径）匹配，只列实际存在、不属于组织权限矩阵的路由。初始内容：`/api/auth/*`（Better Auth，通配；其中的邀请、团队管理接口由 I6、I7 单独测）、`/doc`（OpenAPI 文档）；若实现了健康检查路由，也写进去。新增任何豁免都必须经作者明确批准，不得自行扩大。从 Hono 取路由时要滤掉中间件项，具体写法见 `apps/api/src/isolation.integration.test.ts` 的 I5 用例：先滤掉方法为 ALL 且路径含 `/*` 的项，以及处理函数参数个数大于 1 的项（中间件签名为 (c, next)），再把路径里的 `{param}` 规范化为 `:param`，与路由表比较。
 
 I6 只在走 Better Auth 邀请时需要；若按 BR-2 退回直接添加，I6 作废，该行为由路由表里的 `POST /api/orgs/:orgId/members` 经 I2、I4 覆盖；报告里把 I6 标为不适用，不得声称 I6 通过。I7 与是否走邀请无关，始终保留。
 
 I6 的接受流程保持 Better Auth 默认的邀请 id 生成方式：官方文档说，改用可预测的 id（如 `serial`）会要求邮箱已验证，而本项目不发邮件。
 
-I7 对应 BR-1 和第 4 节末尾的说明。第一版至少含 (a)(b)；(c)(d) 在 D4 的 Sonnet review 之前补齐，让 review 能看到它们。删除团队的配置项名称，官方页的代码示例写作 `disableOrganizationDeletion`，正文却写作 `organizationDeletion`，前后不一致，D2 以所装版本的类型定义为准，记入 DECISIONS.md。官方文档只说 admin「不能更改 owner」，没有明说 admin 能否移除 owner：(c)(d) 若实测与文档说的默认权限不符，停下来报告，由作者决定是否加限制，不自行加钩子。
+I7 对应 BR-1 和第 4 节末尾的说明。第一版至少含 (a)(b)；(c)(d) 在 D4 的 Sonnet review 之前补齐，让 review 能看到它们。删除团队的配置项名称，官方页的代码示例写作 `disableOrganizationDeletion`，正文却写作 `organizationDeletion`，前后不一致，D2 以所装版本的类型定义为准：better-auth 1.7.11 中的属性名是 `disableOrganizationDeletion`（已记入 DECISIONS.md）。官方文档只说 admin「不能更改 owner」，没有明说 admin 能否移除 owner：(c)(d) 若实测与文档说的默认权限不符，停下来报告，由作者决定是否加限制，不自行加钩子。
 
 ### 浏览器（D2 登录，D6 主流程）
 
@@ -374,7 +374,7 @@ Hono RPC 的已知前提：服务端和客户端的 tsconfig 都开 `strict`；�
 
 - **环境变量**：`DATABASE_URL`、`BETTER_AUTH_SECRET`、`BETTER_AUTH_URL`、`TRUSTED_ORIGINS`、`LOG_LEVEL`、`NODE_ENV`，以及仅服务端使用的 `API_HOST`（本地默认 `127.0.0.1`，Compose 为 `0.0.0.0`）与 `API_INTERNAL_URL`（本地 `http://127.0.0.1:3001`，Compose 为 `http://api:3001`）。用 Zod 在启动时校验，缺失就启动失败。提供 `.env.example`，真实 `.env` 不提交。
 - **日志**：结构化 JSON，每条请求记录请求 id、方法、路径、状态码、耗时、用户 id、团队 id。不记录密码、会话令牌、邀请链接。
-- **错误监控**：最小接入，D6 选定工具并记入 DECISIONS.md。
+- **错误监控**：不接第三方，用 Hono 结构化请求与错误日志（见第 12 节、DECISIONS.md DEV-S6-01）。
 - **种子数据**：`pnpm seed` 创建两个团队、若干用户和活动，用于演示。并发测试自己建用户，不依赖种子。
 - **邀请链接**：Better Auth 文档提醒邀请 id 等同于可执行的链接，视为机密：不写日志，不进错误监控。
 - **公开仓库**：这是公开的求职作品仓库。首次推送前检查：`git ls-files` 里没有 `.env`、密钥、真实用户数据或带密码的连接串；`.env.example` 只含占位值；种子数据全部是虚构的；日志、测试夹具、录屏里不出现真实邮箱或令牌。
@@ -385,7 +385,7 @@ Hono RPC 的已知前提：服务端和客户端的 tsconfig 都开 `strict`；�
 | --- | --- |
 | 公网部署（可选加分项） | 不阻塞任何切片，不需要在 D1 前选定。仅当找到成本可接受、条款合适、且实际从中国大陆测试过可访问的方案才做；不做则按本地 Docker 交付 |
 | 仓库公开还是私有 | 已定：公开（作者，2026-10-13）。公开仓库在 GitHub Free 下可用分支保护（已对照官方文档核实）。新仓库 D1 创建 |
-| 工程目录结构 | D1 定，记入 DECISIONS.md。建议 `apps/api`、`apps/web`、`packages/db`、`e2e` |
-| 邀请链接能否在不发邮件时跑通 | D2 实测，超过 2 小时退回 BR-2 的直接添加 |
+| 工程目录结构 | 已定：`apps/api`、`apps/web`、`packages/db`、`e2e`（见 DECISIONS.md 2026-10-20「工作区目录结构、包职责边界与工具链」条目） |
+| 邀请链接能否在不发邮件时跑通 | 已实测：跑通，未触发 BR-2 回退（见 DECISIONS.md「2026-10-21 S1 邀请路径实测（I6）与 BR-2 回退未触发判定」）；I6 适用，`POST …/members` 未实现 |
 | 错误监控工具 | 已定：不接第三方，用 Hono 结构化请求与错误日志（作者，2026-11-07） |
 | BR-10 取消活动：保留还是砍掉 | 已定：保留（2026-10-27） |
