@@ -951,3 +951,34 @@ e2e 与证据口径：
   - 限制：只有一次运行；改动同时改了起栈命令的写法（`--progress=plain` 加输出重定向），不能证明候选原因就是真因，也不能排除偶发失败。失败分支的 annotation 没有被触发过，格式未验证。
 - 过程问题：S6-3c-3 阶段，执行代理的子代理运行了授权外的命令（据其自述包括其余单元测试、全量集成测试、并发测试、迁移校验、前端构建），没有记录，这些命令的结果不采信；其后的指令禁用子代理。同一回报里还混入了重新打字的输出，只采信了能互相印证的数字（41 个用例、哈希前后一致）。
 - 未解：PR #14 在必需检查 `integration-tests` 失败时 `mergeable_state` 是 `unstable` 而不是 `blocked`，原因没有查明；公开视图读到的必需检查是 `ci`、`integration-tests`、`empty-db-migration`、`docker-build`、`concurrency-tests` 五项，不含 `e2e`，比 DEV-S2 的 8b 记录多一项 `concurrency-tests`，何时加入没有记录。
+
+## 2026-11-14 S6 收尾记录（DEV-S6-10）
+
+- 事实：PR #14 于 2026-11-14 以 squash 方式合并，main 为 `61b7b9de4914a2ca2de461ea48503e972cb806b4`。合并后 main 上由 push 触发的 CI 6 项全部 success（含 e2e）。合并前新鲜重建后，本地完整 `pnpm gate` 全绿：单元 16、集成 195、并发 19、迁移校验（3 条记录、9 张表）、next build 路由 6 条、e2e 4 passed。
+- 分支保护的必需检查为 5 项：ci、integration-tests、empty-db-migration、docker-build、concurrency-tests。e2e 未列入必需检查，原因是先在 main 上积累运行记录再决定。
+- 本条是 S6 的收尾记录，放进 S7 的第一个文档提交，因为 main 受保护，不能直接提交。
+- 验证口径：以上数字与"squash 提交的树与分支头 c865232 相同"来自此前的作者回报与代理回报，写入本条时没有重新读取 GitHub，也没有重跑；DEV-S6-09 记录的 e2e 首次失败的原因仍是候选，未证实。
+
+## 2026-11-16 seed 脚本的设计（DEV-S7-01）
+
+- 选择：新增 `scripts/seed.ts` 与 `pnpm seed`。脚本经 HTTP 调用运行中的栈（默认 `http://localhost:3000`）里的 Better Auth 与业务接口创建演示数据，不直连数据库，没有新增依赖（只用全局对象）。内容为 2 个团队、9 个用户、3 个活动：A 团队 3 名额活动有 5 人报名（3 确认、2 候补），A 团队 50 名额活动无报名，B 团队 5 名额活动有 1 人报名。
+- 约束：回环守卫只放行 localhost、127.0.0.1、[::1]，拒绝带用户名口令的地址和非 http(s)；429 最多重试 3 次（共 4 次尝试），读取 `x-retry-after`，缺省等待 11 秒；活动日期由可注入的 `now` 推出（开始为 +14 天，报名截止为 +10 天），没有写死的日期；只设置 `process.exitCode`，不调用 `process.exit`。
+- 日志：不输出口令、cookie、邀请 id。
+- 重跑语义：第一个用户注册时返回"已存在"，脚本输出 `Already seeded` 并以退出码 3 结束，不写数据；`pnpm seed` 会多输出一行 `ELIFECYCLE`，这不是故障。中途失败后再跑会走同一条"已存在"路径，此时数据可能不完整，脚本没有回滚（外键为 RESTRICT）。README 的"演示数据"一节要如实写。
+- 备选：直接写库（放弃：绕过认证入口与业务规则，演示数据不能证明接口可用）。
+
+## 2026-11-16 seed 的证据与口令日志修补（DEV-S7-02）
+
+- 单元测试：`scripts/seed.test.ts` 在 S7-1b 时有 8 个用例，修补后有 10 个。用例编号是该文件自己的（S1–S9b），与 PRD 的切片编号无关。S7-1b 的红灯是 `Cannot find module './seed.ts'`。
+- 变异实验（本机一次性，每次还原后核对了哈希）：M1 放宽回环守卫，S1 红；M2 把重试上限由 3 改 5，S4 红；M3 在日志里拼上 set-cookie，S6 红；M-a 还原 `--dry-run` 分支的日志行，只有 S9b 红；M-b 还原正式运行分支的日志行，只有 S9a 红。没有变异覆盖：S2、S3、S5、S7、S8，S6 里的邀请 id 哨兵，以及 S9a 的"收集到的口令非空"断言。
+- 口令日志：S7-1c 对开发栈真实运行时发现，seed 把固定的演示口令打印进日志（`--dry-run` 与正式运行各 1 处，共 2 处），违反 AGENTS 规则 6 与 PRD 第 11 节。计划阶段曾预测只有 1 处，实测为 2 处，予以更正。S7-1c-1 先写 S9a、S9b（先红：`2 failed | 8 passed`，原因都是 `expected true to be false`），再把两处改成不含口令的文案，转绿后全部单元为 26 passed。该口令是写在公开源码里的本地演示常量。
+- 真实运行（S7-1c，开发栈 Docker Desktop，`127.0.0.1:5433`）：运行前用户、团队、活动为 298、187、146，运行后为 307、189、149，增量为 9、2、3；A 团队 3 名额活动为 3 确认 2 候补；邀请状态为 accepted 的有 7 条；第二次与第三次（`pnpm seed`）运行退出码均为 3，计数不变。**这次真实运行用的是修补口令日志之前的 seed.ts**；修补后只重新真实运行了 `--dry-run` 与"已存在"路径，没有在全新库上用修补后的版本重跑完整流程。
+- Node `fetch` 能发出 `Origin` 头：本机探针实测，收到的头为 `http://localhost:3000`。
+- `vp check` 会检查 `scripts/`：在 `scripts/seed.ts` 末尾加类型错误的探针，`vp check` 退出码为 1 并报 `TS2322`，还原后重新通过，所以没有改 `tsconfig.json`。
+- 未验证：seed 的错误路径与 429 重试路径的日志是否含口令；seed 在全新库上用修补后版本的完整流程。
+
+## 2026-11-16 C1 保留库与演示 SQL（DEV-S7-03）
+
+- 选择：`KEEP_TEST_DB=1` 时测试辅助函数保留测试库，只用 `console.log` 打印库名（不含连接串与口令）；`registrations.concurrency.test.ts` 的 `afterAll` 在保留时跳过清理；`docs/demo/c1-final-state.sql` 对保留库只读地列出 C1 活动的最终状态与 INV-1、INV-2、INV-3、`seq` 的检查，文件开头写明它只证明最终状态，不证明中间状态。`.dockerignore` 有 2 行改动，具体内容见 diff，其构建效果没有单独验证，只由 CI 的 docker-build job 间接覆盖。
+- 证据：`test-helper.integration.test.ts` 新增 3 个用例，其中 2 个先红后绿，集成测试由 195 个增到 198 个。S7-1c 实测：带 `KEEP_TEST_DB=1` 跑 `registrations.concurrency.test.ts`，3 个用例通过；保留库名为 `event_test_1794756238702_354`，与日志里打印的一致，`pg_database` 里恰好 1 个；对它执行演示 SQL，得到 10 条确认、40 条候补，INV-1、INV-2、INV-3、`seq` 互不相同、确认的 `seq` 全部小于候补的，5 个布尔列均为 `t`。这只证明最终状态。
+- 限制：保留库超过 1 小时会被下一次测试启动自动回收（`test-helper.ts` 的回收逻辑），"被回收"这一行为本身没有验证，所以录屏时要在同一次运行后 1 小时内查库。开发库里新增的 9 个演示用户与 2 个演示团队清不掉（外键 RESTRICT），与 e2e 残留一样。

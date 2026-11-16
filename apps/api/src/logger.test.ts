@@ -176,7 +176,7 @@ describe("L10 forwardBetterAuthLog and summarizeError Unit Tests", () => {
   });
 
   it("forwardBetterAuthLog writes 'withheld' when message contains email or URL", () => {
-    forwardBetterAuthLog("info", "User registered with a@b.com successfully");
+    forwardBetterAuthLog("info", "User registered with a@example.com successfully");
     forwardBetterAuthLog("info", "Redirecting to https://example.com/callback");
     forwardBetterAuthLog("info", "SAFE_EVENT_MESSAGE: user.created");
 

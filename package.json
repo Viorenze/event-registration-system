@@ -10,6 +10,7 @@
     "test:concurrency": "vp test -c vite.concurrency.config.ts --run",
     "build:web": "pnpm --filter @event-system/web build",
     "e2e": "node e2e/preflight.mjs && playwright test",
+    "seed": "node scripts/seed.ts",
     "gate": "vp check && vp test && pnpm test:integration && pnpm test:concurrency && pnpm --filter @event-system/db verify:migration && pnpm --filter @event-system/web build && pnpm e2e"
   },
   "devDependencies": {
