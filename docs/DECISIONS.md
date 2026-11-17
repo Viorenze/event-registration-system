@@ -982,3 +982,19 @@ e2e 与证据口径：
 - 选择：`KEEP_TEST_DB=1` 时测试辅助函数保留测试库，只用 `console.log` 打印库名（不含连接串与口令）；`registrations.concurrency.test.ts` 的 `afterAll` 在保留时跳过清理；`docs/demo/c1-final-state.sql` 对保留库只读地列出 C1 活动的最终状态与 INV-1、INV-2、INV-3、`seq` 的检查，文件开头写明它只证明最终状态，不证明中间状态。`.dockerignore` 有 2 行改动，具体内容见 diff，其构建效果没有单独验证，只由 CI 的 docker-build job 间接覆盖。
 - 证据：`test-helper.integration.test.ts` 新增 3 个用例，其中 2 个先红后绿，集成测试由 195 个增到 198 个。S7-1c 实测：带 `KEEP_TEST_DB=1` 跑 `registrations.concurrency.test.ts`，3 个用例通过；保留库名为 `event_test_1794756238702_354`，与日志里打印的一致，`pg_database` 里恰好 1 个；对它执行演示 SQL，得到 10 条确认、40 条候补，INV-1、INV-2、INV-3、`seq` 互不相同、确认的 `seq` 全部小于候补的，5 个布尔列均为 `t`。这只证明最终状态。
 - 限制：保留库超过 1 小时会被下一次测试启动自动回收（`test-helper.ts` 的回收逻辑），"被回收"这一行为本身没有验证，所以录屏时要在同一次运行后 1 小时内查库。开发库里新增的 9 个演示用户与 2 个演示团队清不掉（外键 RESTRICT），与 e2e 残留一样。
+
+## 2026-11-17 S7-3 干净克隆演练记录（DEV-S7-04）
+
+- 方式：在 `G:\s73-drill\event-registration-system` 克隆 main（`8f14c2a84769504a538c09a745443fefc5d3fff3`），暂停开发栈的三个容器（只 stop），用 Compose 项目名 `event-system-drill` 起新栈，数据库卷为 `event-system-drill_postgres_data`。只使用 Docker Desktop 那一套，没有碰 WSL 那套，也没有碰 evidenceos、moontv。环境：Compose v5.7.0，Docker 服务端 29.9.3，存储驱动 overlayfs（containerd 快照），Node v26.13.1，pnpm 12.14.0。
+- 结果（据代理回报；原始记录在作者本机 `%TEMP%`，没有入库）：
+  - `.env` 只替换 `POSTGRES_PASSWORD` 与 `BETTER_AUTH_SECRET` 后起栈：postgres、api healthy，migrate Exited (0)，web Up；`/api/auth/get-session` 返回 200 且响应体为 null；迁移记录 3 条，public 基表 9 张。
+  - `-p event-system-drill` 覆盖了 `docker-compose.yml` 第 1 行的 `name: event-system`：`docker compose ls -a` 里出现 `event-system-drill`，开发项目 `event-system` 仍为 exited(4)。不带 `-p` 时，设置 `COMPOSE_PROJECT_NAME=event-system-drill` 后 `docker compose ps -a` 指向演练栈（只在 `ps -a` 上实测，没有在 `up` 上实测）。
+  - `pnpm seed` 第一次：退出码 0，`user`、`organization`、`events` 为 9、2、3；容量 3 的活动 3 确认 2 候补，容量 5 的活动 1 确认，容量 50 的活动无报名；`invitation` 中 accepted 7 条；`registrations` 共 6 条。第二次：退出码 3，输出含 `Already seeded`，计数不变。这是修补口令日志之后的 seed 在全新库上的完整流程的实测。
+  - C1 保留库：`KEEP_TEST_DB=1` 运行 `registrations.concurrency.test.ts`，1 个文件 3 个用例通过（C1、C2、C7）；保留库恰好 1 个；演示 SQL 得到 10 条 confirmed、40 条 waitlisted，五个布尔检查全为 t。只证明最终状态。
+  - `pnpm e2e`：4 passed（8.7 秒）。e2e 之后 `user`、`organization`、`events` 为 15、6、6。
+  - 泄露扫描：演练记录里的 `POSTGRES_PASSWORD`、`BETTER_AUTH_SECRET`、演示口令、形如邀请链接的 `invite#…` 和 `Set-Cookie:` 值，命中均为 0；曾出现的 `invite#`、`set-cookie` 两个命中是扫描标签自己写进记录的文字，不是值。
+- README 与实测不符，已在 S7-4 修正：（1）只替换两个占位值时，`.env` 里的 `DATABASE_URL` 仍含占位口令，宿主机上的 `pnpm test:concurrency` 报口令认证失败（实测，退出码 1）；测试辅助与 e2e 只在进程里没有 `DATABASE_URL` 时才读 `.env`（据读代码）。（2）本机没有 `psql`，C1 演示改为 `docker compose exec`。（3）`pnpm test:concurrency registrations.concurrency.test.ts` 传文件名有效（1 个文件、3 个用例）。
+- 演练不能证明的：全新机器上的从零构建（本机已有构建缓存，`pnpm install` 7.27 秒，命中 pnpm 缓存）；Node 24（演练用 26）；缺浏览器时的 `pnpm e2e`（本机已有 `chromium-1254`）；本机存在系统环境变量 `DATABASE_URL`，演练时用进程级设置绕开。
+- 副作用与未查明：覆盖镜像标签 `event-system-api:latest`、`event-system-web:latest` 之后，开发容器记录的旧镜像 ID（`5ad01507016a…`、`1e1653cc5aa3…`）用 `docker image inspect` 报 `No such image`，`docker images -a` 的清单里也没有这两个 ID，也没有 `<none>` 行，原因未查明。开发容器还能不能 `docker start` 没有试过。还原开发栈时先试 `docker start`，不行就用 main 重建（需作者批准）。
+- 保留库超过 1 小时被回收：仍未验证。S7-3b-3 里那次失败的运行在口令认证处就退出了（`test-helper.ts` 第 61–64 行，据错误位置推断），没有走到回收逻辑，所以保留库还在不构成回收行为的证据。
+- 过程：第一次 S7-3b-1 因 `.env` 替换没有命中而在步骤 2 停下，Docker 没有被改动；代理给出的原因（旧写法只拆出 1 个元素）没有独立核实。

@@ -29,6 +29,7 @@
 前置：Docker 与 Docker Compose。要在本机运行测试和演示数据脚本，还需要 Node.js 24.11.0 或更高版本，以及 pnpm 12.14.0（`package.json` 的 `packageManager` 字段）。
 
 1. 把 [.env.example](.env.example) 复制为 `.env`，至少把 `POSTGRES_PASSWORD` 和 `BETTER_AUTH_SECRET` 两个占位值换成自己的值（密钥用任意足够长的随机串，CI 里用 `openssl rand -hex 32` 生成）。`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB`、`POSTGRES_PORT`、`BETTER_AUTH_SECRET` 缺失或为空时，Compose 会报错终止。`.env` 不要提交。
+   宿主机上运行集成测试、并发测试、`pnpm e2e` 和 `verify:migration` 时会读取 `.env` 里的 `DATABASE_URL`；Compose 不读它，容器内部的地址由 `POSTGRES_*` 拼出（`docker-compose.yml` 第 33、50 行）。所以也要把 `DATABASE_URL` 里的口令改成同一个 `POSTGRES_PASSWORD`：只改两个占位值时，宿主机上的 `pnpm test:concurrency` 会报 `password authentication failed`（演练实测）。口令含 `@`、`:`、`/` 等字符时需要做 URL 编码，用十六进制串则不用。如果当前 shell 里已经设置了 `DATABASE_URL` 环境变量，测试辅助代码不会再读 `.env`（据读代码：`apps/api/src/test-helper.ts` 第 26 行、`e2e/helpers.ts` 第 40 行），请确认它指向这个库。
 2. 先单独构建 API 镜像，再起栈。`apps/web/Dockerfile` 以 `event-system-api:latest` 为基础镜像，CI 的 e2e 作业也是这个顺序：
 
    ```bash
@@ -40,7 +41,9 @@
 
 端口都只绑定回环地址：web 为 `127.0.0.1:3000`，api 为 `127.0.0.1:3001`，postgres 为 `127.0.0.1:${POSTGRES_PORT}`（`.env.example` 里是 5433）。
 
-停止：`docker compose down`。不加 `-v`，数据库卷会保留。
+停止：`docker compose down`。不加 `-v`，数据库卷会保留；要连数据库卷一起删掉用 `docker compose down -v`（会丢失全部数据，同机有别的栈时先确认项目名）。
+
+如果本机已经有另一个 Compose 项目也叫 `event-system`（例如开发者自己的开发栈），要先停掉它：`docker-compose.yml` 第 1 行把项目名固定为 `event-system`，web、api 的端口 3000、3001 和 `BETTER_AUTH_URL` 也是写死的，不能靠换端口共存。然后用另一个项目名起栈：写 `docker compose -p <名字> …`，或在当前 shell 里设置 `COMPOSE_PROJECT_NAME`（PowerShell：`$env:COMPOSE_PROJECT_NAME = "event-system-drill"`），数据库卷也会换成新项目名下的卷。演练里用 `-p` 起过栈；环境变量只在 `docker compose ps -a` 上实测过能指向新项目。全新机器上不需要这一步。
 
 ## 演示数据
 
@@ -69,8 +72,9 @@ pnpm seed
 
 前提与注意：
 
-- 需要一个可达的 PostgreSQL（例如 Compose 里的 `postgres`），并让 `DATABASE_URL` 对这些命令可见（值的形式见 [.env.example](.env.example)）。数据库不可达时 `pnpm gate` 直接失败，不会自动启动 Docker。集成与并发测试会在这个 PostgreSQL 里创建临时测试库。
+- 需要一个可达的 PostgreSQL（例如 Compose 里的 `postgres`），并让 `DATABASE_URL` 对集成测试、并发测试、`verify:migration` 和 `pnpm e2e` 可见（值的形式见 [.env.example](.env.example)，口令要与 `POSTGRES_PASSWORD` 一致）。`pnpm seed` 不读它，只通过 HTTP 访问运行中的栈。数据库不可达时 `pnpm gate` 直接失败，不会自动启动 Docker。集成与并发测试会在这个 PostgreSQL 里创建临时测试库。
 - `pnpm e2e` 测的是**当前正在运行的栈**（默认 `http://localhost:3000`，可用 `E2E_BASE_URL` 覆盖），不会自己重建它。运行前确认栈是用当前代码新构建的。
+- 首次运行 `pnpm e2e` 前要先安装 Playwright 的浏览器。CI 里用的是 `pnpm exec playwright install --with-deps chromium`（取自 `.github/workflows/ci.yml`）。演练所用的机器早就装过 Chromium，所以这条没有在没有浏览器的机器上验证过。
 
 只在 CI 里跑、不包含在 `pnpm gate` 里的检查：
 
@@ -94,7 +98,21 @@ $env:KEEP_TEST_DB = "1"
 pnpm test:concurrency registrations.concurrency.test.ts
 ```
 
-然后用 `psql` 连接那个保留库（库名见测试输出），执行 [docs/demo/c1-final-state.sql](docs/demo/c1-final-state.sql)。脚本只读，列出 C1 活动各状态的报名数，并检查 INV-1、INV-2、INV-3 以及 `seq` 的相对关系，预期全部为真。它只证明最终状态，不证明中间状态。
+然后在 Compose 的 `postgres` 容器里用 `psql` 连接那个保留库（库名见测试输出，宿主机不需要装 `psql`），执行 [docs/demo/c1-final-state.sql](docs/demo/c1-final-state.sql)：
+
+```powershell
+# PowerShell
+Get-Content docs/demo/c1-final-state.sql | docker compose exec -T postgres psql -U postgres -d <库名>
+```
+
+```bash
+# bash
+docker compose exec -T postgres psql -U postgres -d <库名> < docs/demo/c1-final-state.sql
+```
+
+`-U` 后面是 `.env` 里的 `POSTGRES_USER`。PowerShell 写法在演练里跑过；bash 写法按语法写出，没有在本机跑过。
+
+脚本只读，列出 C1 活动各状态的报名数，并检查 INV-1、INV-2、INV-3 以及 `seq` 的相对关系，预期全部为真。它只证明最终状态，不证明中间状态。
 
 保留库超过 1 小时会被下一次测试启动自动回收（来自代码阅读，回收行为本身没有验证过），所以请在同一次运行后 1 小时内查库。
 
@@ -161,6 +179,16 @@ sequenceDiagram
 - 报名、取消、改名额、递补遵守同一规则：事务内先锁活动行，再读时钟；业务时间判断用独立语句读取 `clock_timestamp()`，不用 `now()`，因为 `now()` 是事务开始时间，事务在行锁上等待之后它已经过期。
 - 部分唯一索引 `UNIQUE (event_id, user_id) WHERE status IN ('confirmed','waitlisted')` 是"同一用户同一活动最多一条有效报名"（INV-3）的最后一道防线，不是主要手段。
 - 递补按 `seq` 从小到大，在取消的同一个事务里完成，不跳人。
+
+## 干净克隆演练
+
+S7 阶段在作者的 Windows 机器上做过一次干净克隆演练：克隆当时的 main（`8f14c2a`），按上面的步骤起栈，再依次执行 `pnpm seed`（两次）、C1 保留库演示和 `pnpm e2e`。结果：迁移 3 条记录、9 张表；`pnpm seed` 第一次退出码 0、第二次退出码 3；C1 演示 SQL 得到 10 条确认、40 条候补，五项检查全为真；e2e 4 条通过。过程记录见 [docs/DECISIONS.md](docs/DECISIONS.md) 的 DEV-S7-04。
+
+这次演练**不能证明**：
+
+- 全新机器上的从零构建：本机已有 Docker 构建缓存，`pnpm install` 命中了 pnpm 缓存。
+- Node.js 24：演练用的是 Node.js 26.13.1，CI 用 24。
+- 缺浏览器时的 `pnpm e2e`：演练所用的机器已经装过 Chromium。
 
 ## 已知限制
 
