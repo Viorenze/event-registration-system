@@ -1,8 +1,10 @@
 # 活动报名系统
 
+[![CI](https://github.com/Viorenze/event-registration-system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Viorenze/event-registration-system/actions/workflows/ci.yml)
+
 团队管理员创建有名额限制的活动，成员报名，满员进候补；有人取消时，候补按先后顺序自动递补。每个团队的数据相互隔离。
 
-这是一个一人、一周、TypeScript 全栈的求职作品项目。重点不在功能多，而在用可重复运行的测试证明下面两件事。
+这是一个个人独立研发的 TypeScript 全栈求职作品项目（按 7 天核心切片推进，并历经独立代码审阅、变异测试加固与干净克隆演练）。重点不在功能多，而在用可重复运行的测试证明下面两件事。
 
 ## 两个硬证据
 
@@ -15,6 +17,22 @@
 - 并发与事务测试（C 系列）直接调用业务层函数，每个 worker 独占一条数据库连接，起跑前断言各连接的后端 pid 互不相同。HTTP 层的状态码映射由 A1、隔离测试 I1–I7 和 Playwright 覆盖。
 - 数据库相关测试连接真实 PostgreSQL，不用 Mock。
 - 开发过程中做过一次性的变异实验：删掉业务代码里的行锁后，C1 得到 47 条确认（名额只有 10）。这个实验记录在 [docs/DECISIONS.md](docs/DECISIONS.md)（DEV-S3-07、DEV-S4-05），没有在当前代码上重跑。
+
+## 界面演示
+
+以下截图由 `pnpm seed` 生成的本地演示数据实拍，展示「满员进入候补 → 取消后按 FIFO 自动递补 → 跨团队访问拦截」闭环：
+
+1. **满员与候补队列**：活动容量 3 人，已有 5 人报名（`已确认 3/3`、`候补 2`，Member A1–A3 确认，A4–A5 候补）。
+
+   ![满员与候补队列](docs/demo/01-waitlist-full.png)
+
+2. **取消后同事务自动递补**：取消 Member A1 后，系统在同一事务内按报名序号（`seq`）自动将候补首位 Member A4 转为 `已确认`（`已确认 3/3`、`候补 1`）。
+
+   ![取消后自动递补](docs/demo/02-auto-promote.png)
+
+3. **跨团队访问拦截**：Demo Org B 成员直接访问 Demo Org A 的活动 URL，服务端权限中间件查 `member` 表返回 403，前端展示访问受限且不泄露任何活动信息。
+
+   ![跨团队访问拦截](docs/demo/03-org-isolation.png)
 
 ## 功能与技术栈
 
